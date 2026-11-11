@@ -297,6 +297,9 @@ address in System Settings → Network. Keep the terminal
 running. Ctrl+C stops the game and saves the emulated memory card in
 `runtime/saves/`.
 
+Without `--disc`, the host starts with no game. Players can still join and
+take slots, and the page asks for a console and a game.
+
 The initial test used the core's built-in HLE BIOS, which froze a game when a
 two-player session started. Put a compatible BIOS dump (for example
 `scph1001.bin`, lowercase) in `runtime/system/`; the core selects it

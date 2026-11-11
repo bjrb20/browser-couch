@@ -26,6 +26,9 @@
               <p class="join-note" id="join-note">Your host must keep the game service running.</p>
             </div>
           </div>
+          <div id="game-picker" class="join-panel" hidden>
+            <div class="join-card"><span class="eyebrow pips">NO GAME RUNNING</span><h2>Choose a console and game.</h2><p id="picker-note">The host has not started a game yet. Everyone stays in the room while one starts.</p><div id="library"></div></div>
+          </div>
           <div id="loading" class="loading" hidden><span class="spinner"></span><span>Connecting to the host…</span></div>
         </div>
         <div class="screen-bar"><span class="live"><i></i><span id="stream-info">Waiting for a stream</span></span><div><button id="sound" disabled>Enable sound</button><button id="fullscreen" aria-label="Fullscreen game">Fullscreen ↗</button><button id="leave" disabled>Leave</button></div></div>

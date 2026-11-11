@@ -23,6 +23,7 @@ from emulator import Emulator
 from fetch_core import core_filename
 from inputs import InputHub
 from media import GameAudio, GameVideo
+from session import Session
 from systems import PROFILES
 import tracer
 
@@ -79,15 +80,15 @@ def host_ice_servers(servers):
 
 
 class Room:
-    def __init__(self, emulator, pin, ice_servers=None, udp_ports=None):
+    def __init__(self, session, pin, ice_servers=None, udp_ports=None):
         self.udp_ports = udp_ports
-        self.emulator = emulator
-        self.hub = emulator.hub
+        self.session = session
+        self.hub = session.hub
         self.pin = pin
         self.ice_servers = ice_servers or []
         self.host_ice_servers = [RTCIceServer(**item) for item in host_ice_servers(self.ice_servers)]
         self.relay = MediaRelay()
-        self.video, self.audio = GameVideo(emulator), GameAudio(emulator)
+        self.video, self.audio = GameVideo(session), GameAudio(session)
         self.clients = {}
         self.attempts = defaultdict(deque)
         self.cleaner = None
@@ -134,8 +135,8 @@ class Room:
         token, client = self.authenticate(request)
         slots = [dict(number=n+1, name=self.clients[owner]['name'] if owner in self.clients else None,
                       yours=owner == token) for n, owner in enumerate(self.hub.slots())]
-        captured = getattr(self.emulator, 'frame_at', None)
-        return web.json_response(dict(slots=slots, host=self.emulator.status(),
+        captured = getattr(self.session, 'frame_at', None)
+        return web.json_response(dict(slots=slots, host=self.session.status(),
                                       inputPollMs=self.hub.timing(token),
                                       sourceFrameAgeMs=max(0, (time.monotonic()-captured)*1000) if captured else None,
                                       viewers=len(self.clients)))
@@ -242,7 +243,7 @@ class Room:
     async def jpeg(self):
         async with self.jpeg_lock:
             if time.monotonic()-self.jpeg_at >= 1/20:
-                pixels = self.emulator.video_frame()
+                pixels = self.session.video_frame()
                 def encode():
                     image = Image.fromarray(pixels).resize((640, 480), Image.Resampling.NEAREST)
                     buffer = io.BytesIO()
@@ -272,7 +273,7 @@ class Room:
             client['ws'] = ws
             client['seen'] = time.monotonic()
             audio = self.relay.subscribe(self.audio, buffered=False)
-            await ws.send_json(dict(t='ready', sampleRate=self.emulator.sample_rate))
+            await ws.send_json(dict(t='ready', sampleRate=self.session.sample_rate))
 
             async def video_loop():
                 while not ws.closed:
@@ -344,7 +345,8 @@ class Room:
         await asyncio.gather(*(self.remove(token) for token in list(self.clients)))
         self.video.stop()
         self.audio.stop()
-        await asyncio.to_thread(self.emulator.stop)
+        if self.session.emulator:
+            await asyncio.to_thread(self.session.emulator.stop)
 
 
 @web.middleware
@@ -402,8 +404,9 @@ def main():
     parser.add_argument('--console', choices=sorted(PROFILES), default='ps1',
                         help='System profile: ps1, ps2 (PCSX2, needs a BIOS) or ps2-play (Play!, OpenGL, Linux)')
     parser.add_argument('--core', help="Libretro core; default: the console's core in runtime/cores")
-    parser.add_argument('--disc', required=True, help='PS1: the original CUE with all referenced BIN tracks. '
-                        'PS2: an ISO/CHD/CSO/CUE disc image or a homebrew ELF')
+    parser.add_argument('--disc', help='PS1: the original CUE with all referenced BIN tracks. '
+                        'PS2: an ISO/CHD/CSO/CUE disc image or a homebrew ELF. '
+                        'Omit it to start the room with no game')
     parser.add_argument('--system', default=str(ROOT/'runtime/system'))
     parser.add_argument('--saves', default=str(ROOT/'runtime/saves'))
     parser.add_argument('--state', help='Optional host-side emulator snapshot to restore')
@@ -438,8 +441,30 @@ def main():
     pin = args.pin or secrets.token_hex(4)
     if len(pin) < 6:
         parser.error('Use a room code of at least six characters')
+    if args.state and not args.disc:
+        parser.error('--state needs --disc')
     ice = json.loads(args.ice_config.read_text()) if args.ice_config else []
     logging.basicConfig(level=logging.WARNING)
+    context = None
+    if args.cert:
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        context.load_cert_chain(args.cert, args.key)
+    hub = InputHub(players)
+    session = Session(hub, start_disc(parser, args, profile, hub) if args.disc else None,
+                      Path(args.disc).stem if args.disc else None)
+    if session.emulator:
+        emulator = session.emulator
+        print(f'Sofa Link host | {emulator.name} {emulator.version} | {emulator.renderer} video', flush=True)
+    else:
+        print('Sofa Link host | no game loaded', flush=True)
+    print(f'Room code: {pin}', flush=True)
+    print('One shared game. Ctrl+C stops the host and saves the memory card.', flush=True)
+    web.run_app(make_app(Room(session, pin, ice, args.udp_ports)), host=args.host, port=args.port,
+                ssl_context=context, access_log=None)
+
+
+def start_disc(parser, args, profile, hub):
+    """Check and start the --disc game; exit with a message on a missing core or BIOS."""
     missing = profile.missing_bios(args.system)
     if missing and profile.bios_required:
         parser.error(missing)
@@ -451,18 +476,10 @@ def main():
         parser.error(f'No core at {core}. A PS2 multitap needs it. Build it with: ./tools/build-pcsx2-multitap.sh')
     if not Path(core).is_file():
         parser.error(f'No core at {core}. Download it with: ./setup.sh --console {profile.key}')
-    emulator = Emulator(core, args.disc, args.system, args.saves, InputHub(players), args.multitap, args.state,
+    emulator = Emulator(core, args.disc, args.system, args.saves, hub, args.multitap, args.state,
                         profile, args.core_option)
     emulator.start()
-    context = None
-    if args.cert:
-        context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-        context.load_cert_chain(args.cert, args.key)
-    print(f'Sofa Link host | {emulator.name} {emulator.version} | {emulator.renderer} video', flush=True)
-    print(f'Room code: {pin}', flush=True)
-    print('One shared game. Ctrl+C stops the host and saves the memory card.', flush=True)
-    web.run_app(make_app(Room(emulator, pin, ice, args.udp_ports)), host=args.host, port=args.port,
-                ssl_context=context, access_log=None)
+    return emulator
 
 
 if __name__ == '__main__':

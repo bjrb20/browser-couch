@@ -55,9 +55,11 @@ function renderSlots(){
   $('viewer-count').textContent=(roomState?.viewers||0)+' in room';
   if(controlReady())connected(mine>=0?'Player '+(mine+1)+' connected':'Watching',true);
 }
+// With no game running, players stay connected and the screen asks for a console and game.
+function renderGame(){$('game-picker').hidden=!token||!roomState||Boolean(roomState.host.game);}
 async function refresh(){
   if(!token||polling)return;polling=true;
-  try{roomState=await api('state');renderSlots();const hz=roomState.host.emulationHz;$('host-info').textContent=roomState.host.core+' · '+(Number.isFinite(hz)?Math.round(hz)+'/':'')+roomState.host.fps+' Hz game'+(roomState.host.multitap==='none'?'':' · '+roomState.host.multitap+' multitap');if(roomState.host.console){$('pad-label').textContent='KEYBOARD → '+roomState.host.pad.toUpperCase();setAnalog(!!roomState.host.analog);$('game-label').textContent='ORIGINAL '+roomState.host.console+' GAME · BROWSER STREAMING';}if(roomState.host.error)message('The emulator stopped: '+roomState.host.error);renderDiagnostics();}
+  try{roomState=await api('state');renderSlots();renderGame();const hz=roomState.host.emulationHz;$('host-info').textContent=!roomState.host.game?'No game loaded':roomState.host.core+' · '+(Number.isFinite(hz)?Math.round(hz)+'/':'')+roomState.host.fps+' Hz game'+(roomState.host.multitap==='none'?'':' · '+roomState.host.multitap+' multitap');if(roomState.host.console){$('pad-label').textContent='KEYBOARD → '+roomState.host.pad.toUpperCase();setAnalog(!!roomState.host.analog);$('game-label').textContent='ORIGINAL '+roomState.host.console+' GAME · BROWSER STREAMING';}if(roomState.host.error)message('The emulator stopped: '+roomState.host.error);renderDiagnostics();}
   catch(e){message(e.message);}finally{polling=false;}
 }
 async function leaveRoom(notify=true){
@@ -70,7 +72,7 @@ async function leaveRoom(notify=true){
   incoming.getTracks().forEach(t=>{t.stop();incoming.removeTrack(t);});video.srcObject=null;
   incomingAudio.getTracks().forEach(t=>{t.stop();incomingAudio.removeTrack(t);});rtcAudio.srcObject=null;rtcAudio.muted=true;
   lastSentMask=null;lastSentAt=0;receiverBufferMs=null;receivedToDisplayMs=null;previousJitter=null;
-  $('join-panel').hidden=false;$('loading').hidden=true;$('join').disabled=false;$('sound').disabled=true;$('leave').disabled=true;
+  $('join-panel').hidden=false;$('game-picker').hidden=true;$('loading').hidden=true;$('join').disabled=false;$('sound').disabled=true;$('leave').disabled=true;
   $('screen').classList.remove('playing');
   $('stream-info').textContent='Waiting for a stream';document.querySelector('.live').classList.remove('active');connected('Not connected');renderSlots();
   if(notify)message('You left the room. Your player slot has been released.');
