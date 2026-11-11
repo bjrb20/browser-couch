@@ -514,6 +514,72 @@ browser: it has no supported inbound port, configured VPN, or media relay.
 The earlier static preview hosts the native prototype, not this streaming
 service. No working cloud join URL is claimed for this host.
 
+### Run it as a container
+
+`docker/compose.yaml` runs the game host and a TURN relay
+([coturn](https://github.com/coturn/coturn)) as one stack. The image holds
+Sofa Link and the PS1 and PS2 cores, fetched at build time. It holds no BIOS
+and no games: you mount your own, read-only.
+
+```sh
+cd docker
+cp sofa-link.env.example sofa-link.env   # not committed
+chmod 600 sofa-link.env
+# Edit it: the PINs, the game and BIOS folders, the proxy address, the relay name.
+docker compose --env-file sofa-link.env up -d --build
+docker compose --env-file sofa-link.env logs -f sofa-link
+```
+
+The stack refuses to start without `SOFA_PIN` (at least 8 characters) and
+`SOFA_ADMIN_PIN` (at least 6, different from the room code). The PINs reach
+the host in its environment and stay out of its log. `SOFA_GAMES` is the
+library folder, with one subfolder per console. `SOFA_BIOS` has the layout of
+`runtime/system`: PS1 BIOS files at the top and PS2 BIOS files in `pcsx2/bios/`.
+The host links them into its writable system folder, because the PS2 core
+writes its own files next to the BIOS. Saves, memory cards and those files go
+in the `data` volume.
+
+Ports published, TCP only:
+
+| Variable | Default | Use |
+|---|---|---|
+| `SOFA_WEB_PORT` | 8081 | The page. Point the HTTPS reverse proxy here. |
+| `SOFA_TURN_PORT` | 3478 | The relay, plain TCP. The reverse proxy adds TLS. |
+
+No UDP port is published. The relay sends media only to the game host, over
+the stack's own network (`SOFA_SUBNET.0/29`), so its UDP ports stay inside.
+
+**Reverse proxy.** Docker keeps the client's source address on a published
+port, so the host sees the proxy's own LAN address. Set `SOFA_TRUSTED_PROXY`
+to that address (see "HTTPS reverse proxy on another machine"). The proxy
+needs two front ends:
+
+- HTTPS for the page, forwarding to `SOFA_WEB_PORT` with `X-Forwarded-Proto:
+  https` and `X-Forwarded-For`, and passing WebSocket upgrades.
+- TLS over TCP for the relay, for example port 5349, forwarding the decrypted
+  TCP stream to `SOFA_TURN_PORT`. Set `SOFA_TURN_PUBLIC_HOST` to its name and
+  `SOFA_TURN_PUBLIC_PORT` to its port. Browsers get
+  `turns:turn.example.org:5349?transport=tcp`.
+
+With `SOFA_TURN_PUBLIC_HOST` empty, the relay still runs, but browsers are
+not offered it. `SOFA_TURN_LAN_HOST` also offers LAN browsers the plain TCP
+port. The host makes the relay password once and keeps it in the `turn`
+volume. Set `SOFA_TURN_NEW_PASSWORD=1` for one start to make a new one.
+
+Both services run as `SOFA_UID:SOFA_GID` (the owner of the game and BIOS
+files) with a read-only root filesystem, no capabilities (the relay keeps
+only the one its binary needs to start), CPU and memory limits, and a
+healthcheck. In Portainer, create a stack from this repository with
+`docker/compose.yaml` as the compose path, and add the variables from
+`sofa-link.env.example` as the stack's environment variables.
+
+Update:
+
+```sh
+git pull
+docker compose --env-file sofa-link.env up -d --build
+```
+
 ## Implementation and verification
 
 `emulator.py` implements the libretro frontend callbacks. The core runs on one
