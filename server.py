@@ -6,6 +6,7 @@ from collections import defaultdict, deque
 import errno
 import hmac
 import io
+import ipaddress
 import json
 import logging
 from pathlib import Path
@@ -428,21 +429,56 @@ class Room:
             await self.session.unload()
 
 
-@web.middleware
-async def local_proxy(request, handler):
-    # A same-host HTTPS proxy (tailscale serve) speaks plain HTTP to us. Trust
-    # its forwarded scheme and client address only from loopback.
-    if request.remote in ('127.0.0.1', '::1'):
-        changes = {}
-        proto = request.headers.get('X-Forwarded-Proto')
-        if proto in ('http', 'https'):
-            changes['scheme'] = proto
-        peer = request.headers.get('X-Forwarded-For', '').rsplit(',', 1)[-1].strip()
-        if peer:
-            changes['remote'] = peer
-        if changes:
-            request = request.clone(**changes)
-    return await handler(request)
+LOOPBACK = (ipaddress.ip_network('127.0.0.0/8'), ipaddress.ip_network('::1/128'))
+
+
+def proxy_networks(text):
+    """--trusted-proxy: comma-separated IPs or CIDRs, added to loopback."""
+    networks = []
+    for item in filter(None, (part.strip() for part in text.split(','))):
+        try:
+            networks.append(ipaddress.ip_network(item, strict=False))
+        except ValueError:
+            raise argparse.ArgumentTypeError(f'Not an IP address or CIDR: {item}') from None
+    return tuple(networks)
+
+
+def trusted_peer(remote, networks):
+    try:
+        address = ipaddress.ip_address(remote or '')
+    except ValueError:
+        return False
+    address = getattr(address, 'ipv4_mapped', None) or address
+    return any(address in network for network in (*LOOPBACK, *networks))
+
+
+def forwarded(networks=()):
+    """Middleware that applies an HTTPS proxy's forwarded headers, from trusted peers only.
+
+    A proxy (tailscale serve on this host, or one on the LAN) speaks plain HTTP
+    to us. From any other peer the headers are ignored, so a browser cannot
+    forge its scheme, host or address.
+    """
+    @web.middleware
+    async def middleware(request, handler):
+        if trusted_peer(request.remote, networks):
+            changes = {}
+            proto = request.headers.get('X-Forwarded-Proto', '').rsplit(',', 1)[-1].strip()
+            if proto in ('http', 'https'):
+                changes['scheme'] = proto
+            host = request.headers.get('X-Forwarded-Host', '').rsplit(',', 1)[-1].strip()
+            if host:
+                changes['host'] = host
+            peer = request.headers.get('X-Forwarded-For', '').rsplit(',', 1)[-1].strip()
+            if peer:
+                changes['remote'] = peer
+            if changes:
+                request = request.clone(**changes)
+        return await handler(request)
+    return middleware
+
+
+local_proxy = forwarded()
 
 
 @web.middleware
@@ -461,8 +497,8 @@ async def same_origin(request, handler):
     return response
 
 
-def make_app(room):
-    app = web.Application(middlewares=[local_proxy, same_origin], client_max_size=256*1024)
+def make_app(room, trusted_proxies=()):
+    app = web.Application(middlewares=[forwarded(trusted_proxies), same_origin], client_max_size=256*1024)
     for route, handler in [('join', room.join), ('offer', room.offer), ('claim', room.claim),
                            ('release', room.release), ('leave', room.leave), ('admin', room.admin),
                            ('game', room.pick), ('game/stop', room.unpick)]:
@@ -509,6 +545,9 @@ def main():
     parser.add_argument('--ice-config', type=Path, help='JSON array of standard WebRTC ICE servers; default LAN-only host candidates')
     parser.add_argument('--udp-ports', type=port_range, metavar='FIRST-LAST',
                         help='Bind WebRTC media to this UDP port range, for a firewall or tailnet ACL rule')
+    parser.add_argument('--trusted-proxy', type=proxy_networks, default=(), metavar='IP_OR_CIDR,...',
+                        help='HTTPS reverse proxies whose X-Forwarded-Proto/-Host/-For headers the host '
+                             'trusts, besides this host itself (loopback, always trusted)')
     parser.add_argument('--cert', help='HTTPS certificate PEM')
     parser.add_argument('--key', help='HTTPS private key PEM')
     args = parser.parse_args()
@@ -563,7 +602,7 @@ def main():
         session, pin, ice, args.udp_ports, library,
         Launcher(args.system, args.saves, ROOT/'runtime/cores', args.players, tuple(args.core_option),
                  args.boot_screen),
-        args.admin_pin)), host=args.host, port=args.port,
+        args.admin_pin), args.trusted_proxy), host=args.host, port=args.port,
                 ssl_context=context, access_log=None)
 
 

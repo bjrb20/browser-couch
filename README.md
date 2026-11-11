@@ -113,8 +113,8 @@ cause. Then use the tailnet URL.
 ### Tailnet
 
 `tailscale serve` gives a tailnet-only HTTPS URL with a trusted certificate.
-It proxies to `127.0.0.1:8081`. The host trusts `X-Forwarded-Proto` and
-`X-Forwarded-For` only from loopback, so joins pass the same-origin check.
+It proxies to `127.0.0.1:8081`. The host always trusts `X-Forwarded-Proto`
+and `X-Forwarded-For` from loopback, so joins pass the same-origin check.
 WebRTC media goes directly to the host's tailnet IP over UDP. If UDP cannot
 connect, the client uses the WebSocket stream over the HTTPS port. That stream
 is slower. If the tailnet ACLs block UDP, ask the admins to allow a fixed range
@@ -481,6 +481,26 @@ allows. If the range is full, new browsers use the WebSocket stream.
 The room code controls joining, and each browser receives a separate session
 token. Use HTTPS or a trusted VPN when carrying the room over the internet.
 Internet deployment has not yet been tested.
+
+### HTTPS reverse proxy on another machine
+
+A proxy on another machine (for example HAProxy on the router) that ends HTTPS
+and forwards plain HTTP must be named with `--trusted-proxy`. Without it the
+host sees a plain-HTTP request, the browser's `https://` origin does not match,
+and joining fails with "Use the host page to join".
+
+```sh
+./run.sh --library "/path/to/games" --host 0.0.0.0 --trusted-proxy 192.0.2.10
+./run.sh ... --trusted-proxy 192.0.2.0/24,198.51.100.4   # several, comma-separated
+```
+
+The proxy must send `X-Forwarded-Proto: https` and `X-Forwarded-For`. If it
+rewrites the `Host` header, it must also send `X-Forwarded-Host` with the name
+that browsers use. The host honours these headers only from the listed
+addresses and from loopback. From any other address they are ignored, so a
+browser cannot forge them. Name the proxy's exact address where you can,
+rather than a whole LAN. The proxy must also pass WebSocket upgrades for
+`/api/socket`.
 
 For WebRTC across NAT, supply `--ice-config /path/to/ice.json`. The file is a
 standard array of ICE server objects; STUN discovers reachable addresses, while
