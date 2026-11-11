@@ -1,0 +1,6 @@
+# Only the program goes into the image: no cores from the host, no BIOS, games or saves.
+*
+!requirements.txt
+!*.py
+!web/
+!docker/start.py

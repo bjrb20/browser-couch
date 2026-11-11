@@ -1,0 +1,89 @@
+# Sofa Link with its TURN relay. See "Run it as a container" in README.md.
+# Set the variables in an env file (start from sofa-link.env.example) or in
+# the Portainer stack. Ports published: the web page and the relay's plain
+# TCP port. No UDP port is published: the relay sends media to the game host
+# over the stack's own network.
+name: sofa-link
+
+x-hardening: &hardening
+  restart: unless-stopped
+  read_only: true
+  cap_drop: [ALL]
+  security_opt: [no-new-privileges:true]
+  # The user that owns the game and BIOS files on the host.
+  user: "${SOFA_UID:-1000}:${SOFA_GID:-1000}"
+  init: true
+
+services:
+  sofa-link:
+    <<: *hardening
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    image: ${SOFA_IMAGE:-sofa-link:local}
+    environment:
+      SOFA_PIN: ${SOFA_PIN:?Set SOFA_PIN, the room code (at least 8 characters)}
+      SOFA_ADMIN_PIN: ${SOFA_ADMIN_PIN:?Set SOFA_ADMIN_PIN, the PIN for choosing games (at least 6 characters)}
+      # The reverse proxy's address as the game host sees it, so joins over HTTPS pass.
+      SOFA_TRUSTED_PROXY: ${SOFA_TRUSTED_PROXY:-}
+      # The relay's public name and TLS port on the reverse proxy. Empty: browsers get no public relay.
+      SOFA_TURN_PUBLIC_HOST: ${SOFA_TURN_PUBLIC_HOST:-}
+      SOFA_TURN_PUBLIC_PORT: ${SOFA_TURN_PUBLIC_PORT:-5349}
+      # Optional: offer LAN browsers the relay's plain TCP port on this address too.
+      SOFA_TURN_LAN_HOST: ${SOFA_TURN_LAN_HOST:-}
+      SOFA_TURN_PORT: ${SOFA_TURN_PORT:-3478}
+      SOFA_TURN_NEW_PASSWORD: ${SOFA_TURN_NEW_PASSWORD:-}
+      SOFA_BOOT_SCREEN: ${SOFA_BOOT_SCREEN:-yes}
+      SOFA_HOST_IP: ${SOFA_SUBNET:-172.31.251}.2
+      SOFA_RELAY_IP: ${SOFA_SUBNET:-172.31.251}.3
+    volumes:
+      - ${SOFA_GAMES:?Set SOFA_GAMES, the host folder with one subfolder per console}:/games:ro
+      - ${SOFA_BIOS:?Set SOFA_BIOS, the host folder with the BIOS dumps}:/bios:ro
+      - data:/data
+      - turn:/turn
+    tmpfs:
+      - /tmp:size=256m
+    ports:
+      - "${SOFA_BIND:-0.0.0.0}:${SOFA_WEB_PORT:-8081}:8081/tcp"
+    networks:
+      sofa:
+        ipv4_address: ${SOFA_SUBNET:-172.31.251}.2
+    cpus: ${SOFA_CPUS:-4}
+    mem_limit: ${SOFA_MEMORY:-4g}
+    pids_limit: 512
+    # Stopping a game writes its memory card.
+    stop_grace_period: 30s
+
+  turn:
+    <<: *hardening
+    image: coturn/coturn:4.18.0
+    # The image's turnserver has this file capability: without it, it cannot start.
+    cap_add: [NET_BIND_SERVICE]
+    # The game host writes this file at each start, with the one-time password.
+    command: ["-c", "/turn/turnserver.conf"]
+    volumes:
+      - turn:/turn:ro
+    tmpfs:
+      - /tmp:size=16m
+    ports:
+      - "${SOFA_BIND:-0.0.0.0}:${SOFA_TURN_PORT:-3478}:3478/tcp"
+    networks:
+      sofa:
+        ipv4_address: ${SOFA_SUBNET:-172.31.251}.3
+    depends_on:
+      sofa-link:
+        condition: service_healthy
+        restart: true
+    cpus: 1
+    mem_limit: 256m
+    pids_limit: 64
+
+networks:
+  sofa:
+    ipam:
+      config:
+        - subnet: ${SOFA_SUBNET:-172.31.251}.0/29
+
+volumes:
+  data:  # saves, memory cards and the PS2 console's own files
+  turn:  # the relay password and configuration
