@@ -30,6 +30,18 @@ class InputHub:
             self.inputs.pop(client, None)
             self.applied.pop(client, None)
 
+    def resize(self, players):
+        """Change the slot count for the next game. Players in slots that still exist keep them."""
+        with self.lock:
+            for owner in self.owners[players:]:
+                self.inputs.pop(owner, None)
+                self.applied.pop(owner, None)
+            keep = min(players, self.players)
+            self.owners = self.owners[:keep] + [None]*(players-keep)
+            self.last_polled = self.last_polled[:keep] + [0]*(players-keep)
+            self.polls = self.polls[:keep] + [0]*(players-keep)
+            self.players = players
+
     def release(self, client):
         with self.lock:
             self.owners = [None if owner == client else owner for owner in self.owners]

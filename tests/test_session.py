@@ -46,7 +46,7 @@ class IdleSessionTests(IsolatedAsyncioTestCase):
         session = Session(InputHub(2), emulator, 'Demo')
         self.assertEqual(session.sample_rate, 48000)
         self.assertEqual(session.frame_at, 3.)
-        self.assertEqual(session.status(), dict(core='PCSX-ReARMed', error=None, game=dict(title='Demo')))
+        self.assertEqual(session.status(), dict(core='PCSX-ReARMed', error=None, game=dict(title='Demo', id=None), loading=None))
 
     async def test_players_join_and_claim_slots_in_an_idle_room(self):
         room = Room(Session(InputHub(4)), 'qa-canyon')

@@ -24,7 +24,7 @@ from fetch_core import core_filename
 from inputs import InputHub
 from library import Library
 from media import GameAudio, GameVideo
-from session import Session
+from session import Launcher, Session
 from systems import PROFILES
 import tracer
 
@@ -81,9 +81,12 @@ def host_ice_servers(servers):
 
 
 class Room:
-    def __init__(self, session, pin, ice_servers=None, udp_ports=None, library=None):
+    def __init__(self, session, pin, ice_servers=None, udp_ports=None, library=None, launcher=None,
+                 admin_pin=None):
         self.udp_ports = udp_ports
         self.library = library
+        self.launcher = launcher
+        self.admin_pin = admin_pin
         self.scanned_at = None
         self.scan_lock = asyncio.Lock()
         self.session = session
@@ -109,16 +112,25 @@ class Room:
         self.clients[token]['seen'] = time.monotonic()
         return token, self.clients[token]
 
-    async def join(self, request):
+    def throttle(self, key, what):
+        """The failed attempts from one address in the last minute; refuse a 13th."""
         now = time.monotonic()
         # Bounded rate-limit table; forwarding proxies can supply one shared IP.
         if len(self.attempts) > 2048:
             self.attempts.clear()
-        attempts = self.attempts[request.remote]
+        attempts = self.attempts[key]
         while attempts and attempts[0] < now-60:
             attempts.popleft()
         if len(attempts) >= 12:
-            raise web.HTTPTooManyRequests(text='Too many join attempts. Wait a minute.')
+            raise web.HTTPTooManyRequests(text=f'Too many {what} attempts. Wait a minute.')
+        return attempts
+
+    def can_pick(self, client):
+        return bool(self.library) and (not self.admin_pin or client['admin'])
+
+    async def join(self, request):
+        now = time.monotonic()
+        attempts = self.throttle(request.remote, 'join')
         body = await request.json()
         if not isinstance(body, dict):
             raise web.HTTPBadRequest(text='Invalid join request')
@@ -132,7 +144,8 @@ class Room:
         if not isinstance(name, str) or not name.strip() or len(name) > 24:
             raise web.HTTPBadRequest(text='Enter a name of 1–24 characters')
         token = secrets.token_urlsafe(32)
-        self.clients[token] = dict(name=name.strip(), seen=now, pc=None, tracks=[], channel=None, ws=None)
+        self.clients[token] = dict(name=name.strip(), seen=now, pc=None, tracks=[], channel=None, ws=None,
+                                  admin=False)
         return web.json_response(dict(token=token, iceServers=self.ice_servers))
 
     async def state(self, request):
@@ -143,7 +156,8 @@ class Room:
         return web.json_response(dict(slots=slots, host=self.session.status(),
                                       inputPollMs=self.hub.timing(token),
                                       sourceFrameAgeMs=max(0, (time.monotonic()-captured)*1000) if captured else None,
-                                      viewers=len(self.clients)))
+                                      viewers=len(self.clients), canPick=self.can_pick(client),
+                                      adminPin=bool(self.admin_pin) and bool(self.library)))
 
     async def games(self, request):
         """The game library: console names, titles and ids only."""
@@ -155,6 +169,53 @@ class Room:
                 await asyncio.to_thread(self.library.scan)
                 self.scanned_at = time.monotonic()
         return web.json_response(self.library.public())
+
+    async def admin(self, request):
+        """Unlock game picking for this player with the --admin-pin."""
+        _, client = self.authenticate(request)
+        attempts = self.throttle(('admin', request.remote), 'PIN')
+        body = await request.json()
+        pin = body.get('pin', '') if isinstance(body, dict) else ''
+        if not self.admin_pin or not isinstance(pin, str) or \
+                not hmac.compare_digest(pin.encode(), self.admin_pin.encode()):
+            attempts.append(time.monotonic())
+            raise web.HTTPForbidden(text='The PIN is incorrect')
+        client['admin'] = True
+        return web.json_response(dict(ok=True))
+
+    def picker(self, request):
+        _, client = self.authenticate(request)
+        if not self.library:
+            raise web.HTTPNotFound(text='This host has no game library')
+        if not self.can_pick(client):
+            raise web.HTTPForbidden(text='Enter the PIN to choose games')
+        if self.session.lock.locked():
+            raise web.HTTPConflict(text='A game is starting. Wait a moment.')
+
+    async def pick(self, request):
+        """Unload the running game, if any, and start a library game. Players keep their slots."""
+        self.picker(request)
+        body = await request.json()
+        game = self.library.games.get(body.get('id')) if isinstance(body, dict) else None
+        if not game:
+            raise web.HTTPNotFound(text='That game is no longer in the library')
+        async with self.session.lock:
+            await self.session.unload()
+            _, players, _ = self.launcher.plan(game)
+            self.hub.resize(players)
+            try:
+                await self.session.load(self.launcher.emulator(game, self.hub), game.title, game.id)
+            except RuntimeError as error:
+                print(error, flush=True)
+                raise web.HTTPInternalServerError(text=str(error)) from error
+        return web.json_response(dict(ok=True))
+
+    async def unpick(self, request):
+        """Stop the game and go back to the picker. The memory card is saved as the game stops."""
+        self.picker(request)
+        async with self.session.lock:
+            await self.session.unload()
+        return web.json_response(dict(ok=True))
 
     async def claim(self, request):
         token, client = self.authenticate(request)
@@ -360,8 +421,8 @@ class Room:
         await asyncio.gather(*(self.remove(token) for token in list(self.clients)))
         self.video.stop()
         self.audio.stop()
-        if self.session.emulator:
-            await asyncio.to_thread(self.session.emulator.stop)
+        async with self.session.lock:
+            await self.session.unload()
 
 
 @web.middleware
@@ -400,7 +461,8 @@ async def same_origin(request, handler):
 def make_app(room):
     app = web.Application(middlewares=[local_proxy, same_origin], client_max_size=256*1024)
     for route, handler in [('join', room.join), ('offer', room.offer), ('claim', room.claim),
-                           ('release', room.release), ('leave', room.leave)]:
+                           ('release', room.release), ('leave', room.leave), ('admin', room.admin),
+                           ('game', room.pick), ('game/stop', room.unpick)]:
         app.router.add_post('/api/' + route, handler)
     app.router.add_get('/api/state', room.state)
     app.router.add_get('/api/library', room.games)
@@ -436,6 +498,8 @@ def main():
     parser.add_argument('--host', default='127.0.0.1', help='Use 0.0.0.0 to accept LAN browsers')
     parser.add_argument('--port', type=int, default=8081)
     parser.add_argument('--pin', help='Room access code; generated if omitted')
+    parser.add_argument('--admin-pin', help='PIN a player enters before choosing games; '
+                                            'without it, every player in the room may choose')
     parser.add_argument('--ice-config', type=Path, help='JSON array of standard WebRTC ICE servers; default LAN-only host candidates')
     parser.add_argument('--udp-ports', type=port_range, metavar='FIRST-LAST',
                         help='Bind WebRTC media to this UDP port range, for a firewall or tailnet ACL rule')
@@ -463,6 +527,10 @@ def main():
         parser.error('--state needs --disc')
     if args.library and not args.library.is_dir():
         parser.error(f'No library folder at {args.library}')
+    if args.admin_pin is not None and not args.library:
+        parser.error('--admin-pin needs --library')
+    if args.admin_pin is not None and len(args.admin_pin) < 4:
+        parser.error('Use an admin PIN of at least four characters')
     library = Library(args.library, args.system, ROOT/'runtime/cores').scan() if args.library else None
     ice = json.loads(args.ice_config.read_text()) if args.ice_config else []
     logging.basicConfig(level=logging.WARNING)
@@ -485,7 +553,10 @@ def main():
                   + (f" | {library.warnings[console['id']]}" if library.warnings[console['id']] else ''), flush=True)
     print(f'Room code: {pin}', flush=True)
     print('One shared game. Ctrl+C stops the host and saves the memory card.', flush=True)
-    web.run_app(make_app(Room(session, pin, ice, args.udp_ports, library)), host=args.host, port=args.port,
+    web.run_app(make_app(Room(
+        session, pin, ice, args.udp_ports, library,
+        Launcher(args.system, args.saves, ROOT/'runtime/cores', args.players, tuple(args.core_option)),
+        args.admin_pin)), host=args.host, port=args.port,
                 ssl_context=context, access_log=None)
 
 

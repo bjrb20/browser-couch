@@ -24,6 +24,7 @@ class Profile:
     library: str = ''  # the --library subfolder for this console's games
     extensions: tuple = ()  # game files the library lists; files a CUE or M3U names are left out
     bios_files: tuple = ()  # BIOS dumps the core looks for in runtime/system itself, when it has no folder
+    library_options: tuple = ()  # KEY=VALUE core options for library games, which each get a save folder
 
     def options(self, multitap=None, overrides=()):
         """Core option values for this session, with KEY=VALUE overrides applied last."""
@@ -87,6 +88,8 @@ PROFILES = {profile.key: profile for profile in (
         multitap_core='pcsx2_multitap',
         bios='pcsx2/bios', bios_required=True,
         library='ps2', extensions=('.iso', '.chd', '.cso', '.cue', '.elf'),
+        # Memory cards in the game's own save folder, not one pair shared by every game.
+        library_options=('pcsx2_shared_memory_cards=disabled',),
         bios_hint='Copy a dump of your own console BIOS there (for example SCPH-70012.bin).',
     ),
     # Play! boots homebrew ELFs without a BIOS (built-in HLE), but draws only

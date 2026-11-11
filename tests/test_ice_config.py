@@ -5,8 +5,10 @@ import numpy as np
 from aiohttp.test_utils import TestClient, TestServer
 from aiortc import RTCConfiguration, RTCPeerConnection
 
+from inputs import InputHub
 import server
 from server import Room, host_ice_servers, make_app
+from session import Session
 
 ICE = [{'urls': ['stun:192.0.2.10:3478',
                  'turn:192.0.2.10:3478?transport=tcp',
@@ -15,12 +17,10 @@ ICE = [{'urls': ['stun:192.0.2.10:3478',
        {'urls': 'turn:192.0.2.11:3478', 'username': 'other', 'credential': 'other'}]
 
 
-def emulator():
-    fake = Mock()
-    fake.hub.slots.return_value = [None, None]
+def session():
+    fake = Mock(thread=None, sample_rate=44100)
     fake.video_frame.return_value = np.zeros((480, 640, 3), np.uint8)
-    fake.sample_rate = 44100
-    return fake
+    return Session(InputHub(2), fake, 'Demo')
 
 
 class HostIceServerTests(IsolatedAsyncioTestCase):
@@ -30,7 +30,7 @@ class HostIceServerTests(IsolatedAsyncioTestCase):
 
     async def test_browser_gets_the_ice_servers_and_the_host_gets_no_turn(self):
         relay_only = ICE[1:]  # a STUN check to a test address waits 5 s
-        room = Room(emulator(), 'qa-canyon', relay_only)
+        room = Room(session(), 'qa-canyon', relay_only)
         async with TestClient(TestServer(make_app(room))) as client:
             response = await client.post('/api/join', json=dict(pin='qa-canyon', name='Ann'))
             self.assertEqual(response.status, 200)
