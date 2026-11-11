@@ -7,7 +7,7 @@ from aiohttp.test_utils import TestClient, TestServer
 
 from fetch_core import core_filename
 from inputs import InputHub
-from library import Library, game_id
+from library import Library, game_id, missing_tracks
 from server import Room, make_app
 from session import Session
 
@@ -123,6 +123,29 @@ class ScanTests(TestCase):
         for secret in (self.temporary.name, 'GAME.cue', '.elf', 'system'):
             self.assertNotIn(secret, text)
         self.assertIn(str(self.host.system), library.warnings['ps2'], 'the terminal still gets the folder')
+
+    def test_missing_tracks_are_named_by_count_and_kind_not_by_file(self):
+        cue = self.host.file('ps1/Fighter/Fighter.cue', 'FILE "Fighter (Track 01).bin" BINARY\r\n  TRACK 01 MODE2/2352\r\n'
+                             'FILE "Fighter (Track 02).bin" BINARY\r\n  TRACK 02 AUDIO\r\n')
+        self.host.file('ps1/Fighter/Fighter (Track 01).7z')
+        self.host.file('ps1/Fighter/Track 01.bin.ecm')
+        self.host.file('ps1/Fighter/Fighter (Track 02).ape')
+        self.host.file('ps1/Fighter/.DS_Store')
+        text = missing_tracks(cue)
+        self.assertIn('names 2 track files that are not there', text)
+        self.assertIn('Its folder has .7z, .ape, .ecm files instead', text)
+        self.assertNotIn('Fighter', text)
+        self.host.file('ps1/Fighter/Fighter (Track 01).bin')
+        self.assertIn('names 1 track file that is not there.', missing_tracks(cue))
+        self.host.file('ps1/Fighter/Fighter (Track 02).bin')
+        self.assertIsNone(missing_tracks(cue))
+        saga = self.host.file('ps1/Saga.m3u', 'Saga (Disc 1).chd\nSaga (Disc 2).chd\n')
+        self.host.file('ps1/Saga (Disc 1).chd')
+        self.assertTrue(missing_tracks(saga).startswith('The M3U names 1 disc file that is not there.'))
+        self.assertIsNone(missing_tracks(self.host.file('ps1/Puzzle.pbp')))
+        self.host.core('pcsx_rearmed')
+        titles = [item['title'] for item in console(self.host.scan(), 'ps1')['games']]
+        self.assertEqual(titles, ['Fighter', 'Puzzle', 'Saga'], 'the library still lists it')
 
 
 class LibraryApiTests(IsolatedAsyncioTestCase):

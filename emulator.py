@@ -14,6 +14,7 @@ from pathlib import Path
 import numpy as np
 
 import hwrender
+from library import missing_tracks
 from systems import PROFILES
 
 log = logging.getLogger(__name__)
@@ -256,6 +257,9 @@ class Emulator:
         for path in (self.core_path, self.disc):
             if not path.is_file():
                 raise RuntimeError(f'Missing file: {path}')
+        tracks = missing_tracks(self.disc)
+        if tracks:
+            raise RuntimeError(tracks)
         missing = self.profile.missing_bios(self.system)
         if missing and self.profile.bios_required:
             raise RuntimeError(missing)

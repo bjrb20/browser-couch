@@ -82,6 +82,30 @@ def referenced(playlist):
     return names
 
 
+def missing_tracks(playlist):
+    """For a CUE or M3U: why the files it names cannot be read, or None when they are all there.
+
+    The message names no files, because a browser may see it.
+    """
+    if playlist.suffix.lower() not in ('.cue', '.m3u'):
+        return None
+    missing = sorted(path for path in referenced(playlist) if not path.is_file())
+    if not missing:
+        return None
+    kind = 'track' if playlist.suffix.lower() == '.cue' else 'disc'
+    text = f'The {playlist.suffix[1:].upper()} names {len(missing)} {kind} file{"s" if len(missing) > 1 else ""} that '
+    text += 'is not there.' if len(missing) == 1 else 'are not there.'
+    named = {path.name.casefold() for path in referenced(playlist)} | {playlist.name.casefold()}
+    others = sorted({path.suffix.lower() for path in playlist.parent.iterdir()
+                     if path.is_file() and path.suffix and not path.name.startswith('.')
+                     and path.name.casefold() not in named and path.suffix.lower() not in ('.cue', '.m3u')})
+    if others:
+        text += f' Its folder has {", ".join(others)} files instead.'
+    if kind == 'track':
+        text += ' The core reads raw BIN tracks or one CHD: convert compressed tracks (APE, ECM, 7z) first.'
+    return text
+
+
 def files(folder, extensions):
     found = []
     for path in sorted(folder.rglob('*')):

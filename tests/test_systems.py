@@ -47,6 +47,16 @@ class ProfileTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, 'No PS2 BIOS'):
                 emulator._load()
 
+    def test_emulator_names_missing_cue_tracks_before_loading_the_core(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root/'core.so').write_bytes(b'')
+            (root/'game.cue').write_text('FILE "game.bin" BINARY\n  TRACK 01 MODE2/2352\n')
+            (root/'game.ape').write_bytes(b'')
+            emulator = Emulator(root/'core.so', root/'game.cue', root/'system', root/'saves', InputHub(2))
+            with self.assertRaisesRegex(RuntimeError, 'names 1 track file that is not there. Its folder has .ape'):
+                emulator._load()
+
     def test_controller_info_limits_the_ports_and_the_players(self):
         import ctypes as C
         from emulator import ControllerInfo
