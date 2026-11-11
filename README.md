@@ -324,6 +324,50 @@ core's built-in HLE BIOS, with a warning.
 Browsers get only the console names, game titles and ids. They never get
 file paths, discs, ROMs or BIOS files.
 
+### Choose and switch games
+
+```sh
+./run.sh --library "/path/to/games" --host 0.0.0.0
+./run.sh --library "/path/to/games" --admin-pin 2468   # only players with the PIN choose
+```
+
+With no game running, the page lists the games. Without `--admin-pin`, any
+player in the room may choose. With it, a player enters the PIN once to
+unlock choosing for their browser. "Change game" below the stream opens the
+list over a running game. "Stop the game" goes back to the list.
+
+Switching stops the running game and writes its memory card, then starts the
+next game. Nobody leaves the room: the room code, the stream and every player's
+slot stay. When the next console reads fewer pads, players in the slots it
+lacks become viewers. Only one game starts at a time.
+
+Each library game saves in its own folder,
+`runtime/saves/<console>/<title> [<id>]/`. PS2 memory cards are kept there too,
+instead of in one pair shared by every game. A `--disc` game still saves in
+`runtime/saves/`.
+
+PS1 library games use four slots on the multitap, as with `--disc`. PS2 games
+use two, or four when the multitap core is built (see "PS2"). `--players` and
+`--core-option` apply to every library game.
+
+### Boot screen
+
+Library games play the console's own boot screen before the game. Untick
+"Play the console's boot screen first" in the list to skip it for one start,
+or start the host with `--no-boot-screen` to make that the default.
+
+- **PS1** shows the Sony logo and the licence screen, about 11 seconds. This
+  needs a BIOS dump in `runtime/system/`: the built-in HLE BIOS has no boot
+  screen, so without a dump the list says there is none. The core warns that
+  showing the boot logo may reduce compatibility with some games; untick it if a
+  game fails to start.
+- **PS2 with PCSX2** turns fast boot off and shows the console's boot animation,
+  about 12 seconds longer than with fast boot.
+- **PS2 with Play!** has no boot screen. The list says so.
+
+A `--core-option` (`pcsx_rearmed_show_bios_bootlogo`, `pcsx2_fastboot`)
+overrides the choice.
+
 The initial test used the core's built-in HLE BIOS, which froze a game when a
 two-player session started. Put a compatible BIOS dump (for example
 `scph1001.bin`, lowercase) in `runtime/system/`; the core selects it
