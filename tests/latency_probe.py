@@ -22,6 +22,7 @@ from playwright.async_api import async_playwright
 
 from inputs import InputHub
 from server import Room, make_app
+from session import Session
 
 
 class ProbeCore:
@@ -31,6 +32,7 @@ class ProbeCore:
         self.value = 0
         self.frames = 0
         self.task = None
+        self.thread = None  # Session.unload checks the emulator thread
         self.audio_read = time.monotonic()  # silence accrues at the real sample rate
 
     async def run(self):
@@ -66,7 +68,7 @@ async def main():
     core = ProbeCore()
     core.task = asyncio.create_task(core.run())
     ice = json.loads(Path(sys.argv[sys.argv.index('--ice')+1]).read_text()) if '--ice' in sys.argv else []
-    runner = web.AppRunner(make_app(Room(core, 'probe-latency', ice)))
+    runner = web.AppRunner(make_app(Room(Session(core.hub, core, 'Latency probe'), 'probe-latency', ice)))
     await runner.setup()
     site = web.TCPSite(runner, '127.0.0.1', 0)
     await site.start()
@@ -145,15 +147,16 @@ async def main():
                     const probeCanvas=document.createElement('canvas');probeCanvas.width=probeCanvas.height=1;const probeContext=probeCanvas.getContext('2d');
                     let old=-1;
                     function sample(){if(streamRoom.transport==='webrtc'&&v.videoWidth)probeContext.drawImage(v,0,0,1,1);const pixels=streamRoom.transport==='webrtc'?probeContext.getImageData(0,0,1,1):ctx.getImageData(320,240,1,1);const value=pixels.data[0]>127?1:0;if(value!==old){probe.draws.push({value,at:performance.now()});old=value;}requestAnimationFrame(sample);}sample();
-                    addEventListener('keydown',e=>{if(e.code==='KeyX')probe.events.push({value:1,at:performance.now()});},true);
-                    addEventListener('keyup',e=>{if(e.code==='KeyX')probe.events.push({value:0,at:performance.now()});},true);
+                    addEventListener('keydown',e=>{if(e.code==='KeyK')probe.events.push({value:1,at:performance.now()});},true);
+                    addEventListener('keyup',e=>{if(e.code==='KeyK')probe.events.push({value:0,at:performance.now()});},true);
                 }''')
+                await page.evaluate('() => document.activeElement?.blur()')  # keys reach the game, not the form
                 for n in range(24):
                     desired = int(n % 2 == 0)
                     if desired:
-                        await page.keyboard.down('KeyX')
+                        await page.keyboard.down('KeyK')
                     else:
-                        await page.keyboard.up('KeyX')
+                        await page.keyboard.up('KeyK')
                     await page.wait_for_function('''value => {
                         const e=probe.events.at(-1),d=probe.draws.at(-1);
                         return e&&d&&d.value===value&&d.at>=e.at;
