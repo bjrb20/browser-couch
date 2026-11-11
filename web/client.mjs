@@ -26,7 +26,7 @@ function sendInput(force=false){
   }
 }
 function clearInput(){keys.clear();touches.clear();sticks.forEach((s,n)=>moveStick(n,0,0));lastSentAxes='0,0,0,0';document.querySelectorAll('.pressed').forEach(b=>b.classList.remove('pressed'));if(send({t:'input',seq:++sequence,mask:0})){lastSentMask=0;lastSentAt=performance.now();}}
-function editing(){return /INPUT|SELECT|TEXTAREA/.test(document.activeElement?.tagName);}
+function editing(){return /INPUT|SELECT|TEXTAREA/.test(document.activeElement?.tagName)||!$('game-picker').hidden;}
 function gamepads(){try{return Array.from(navigator.getGamepads?.()||[]).filter(Boolean);}catch{return [];}}
 function selectedPad(){const pads=gamepads();return $('gamepad').value==='auto'?pads[0]:pads.find(p=>String(p.index)===$('gamepad').value);}
 function updatePads(){
@@ -56,10 +56,38 @@ function renderSlots(){
   if(controlReady())connected(mine>=0?'Player '+(mine+1)+' connected':'Watching',true);
 }
 // With no game running, players stay connected and the screen asks for a console and game.
-function renderGame(){$('game-picker').hidden=!token||!roomState||Boolean(roomState.host.game);}
+// "Change game" opens the same list over a running game. Browsers only ever get titles and ids.
+let pickerOpen=false,library=null,libraryAt=0,picking=false,pickerDrawn='',bootChosen=false;
+async function loadLibrary(){if(!library||performance.now()-libraryAt>15000){libraryAt=performance.now();try{const fresh=await api('library');if(!bootChosen)$('boot-screen').checked=fresh.bootScreen;library=fresh;}catch(e){message(e.message);}}renderLibrary();}
+function renderLibrary(){
+  const host=roomState?.host,list=$('library'),busy=picking||Boolean(host?.loading),can=Boolean(roomState?.canPick);
+  const drawn=JSON.stringify([library,host?.game,host?.loading,host?.error,can,busy,roomState?.adminPin]);if(drawn===pickerDrawn)return;pickerDrawn=drawn;
+  $('admin').hidden=can||!roomState?.adminPin;$('stop-game').hidden=!can||!host?.game;$('close-picker').hidden=!host?.game;
+  $('picker-eyebrow').textContent=host?.loading?'STARTING':host?.game?'NOW PLAYING · '+host.game.title.toUpperCase():'NO GAME RUNNING';
+  $('picker-note').textContent=host?.loading?'Starting '+host.loading+'… Everyone stays in the room.':host?.error&&!host.game?host.error:!library?.consoles.length?'The host has no game library. Start the host with --library to choose games here.':can?(host?.game?'Switching stops this game and saves its memory card first.':'Everyone stays in the room while a game starts.'):roomState?.adminPin?'The host chooses the game. Enter the host PIN to choose one yourself.':'The host has not started a game yet.';
+  $('boot-option').hidden=!can||!library?.consoles.some(c=>c.bootScreen);list.replaceChildren();
+  for(const item of library?.consoles||[]){
+    const box=document.createElement('section'),title=document.createElement('h3'),games=document.createElement('div');box.className='console';games.className='games';title.textContent=item.name;box.append(title);
+    const notes=[item.warning,item.available&&!item.bootScreen?'No boot screen for '+item.name+' on this host.':null].filter(Boolean);
+    if(notes.length){const p=document.createElement('p');p.textContent=notes.join(' ');box.append(p);}
+    if(item.available&&!item.games.length){const p=document.createElement('p');p.textContent='No games in this folder yet.';box.append(p);}
+    for(const game of item.games){const b=document.createElement('button');b.type='button';b.textContent=game.title+(host?.game?.id===game.id?' · playing':'');b.disabled=!can||busy;b.addEventListener('click',()=>pick(game,item));games.append(b);}
+    box.append(games);list.append(box);
+  }
+}
+async function pick(game,item){
+  const host=roomState?.host;if(host?.game&&!confirm('Switch to '+game.title+'? '+host.game.title+' stops for everyone and its memory card is saved.'))return;
+  picking=true;renderLibrary();clearInput();
+  try{await api('game',{id:game.id,bootScreen:item.bootScreen&&$('boot-screen').checked});pickerOpen=false;message('Now playing '+game.title+'.');}catch(e){message(e.message);}finally{picking=false;await refresh();}
+}
+function renderGame(){
+  const game=roomState?.host.game,show=Boolean(token&&roomState&&(!game||pickerOpen));
+  $('change-game').hidden=!token||!game||!roomState?.canPick&&!roomState?.adminPin;$('game-picker').hidden=!show;
+  if(show)void loadLibrary();
+}
 async function refresh(){
   if(!token||polling)return;polling=true;
-  try{roomState=await api('state');renderSlots();renderGame();const hz=roomState.host.emulationHz;$('host-info').textContent=!roomState.host.game?'No game loaded':roomState.host.core+' · '+(Number.isFinite(hz)?Math.round(hz)+'/':'')+roomState.host.fps+' Hz game'+(roomState.host.multitap==='none'?'':' · '+roomState.host.multitap+' multitap');if(roomState.host.console){$('pad-label').textContent='KEYBOARD → '+roomState.host.pad.toUpperCase();setAnalog(!!roomState.host.analog);$('game-label').textContent='ORIGINAL '+roomState.host.console+' GAME · BROWSER STREAMING';}if(roomState.host.error)message('The emulator stopped: '+roomState.host.error);renderDiagnostics();}
+  try{roomState=await api('state');renderSlots();renderGame();const hz=roomState.host.emulationHz;$('host-info').textContent=!roomState.host.game?'No game loaded':roomState.host.core+' · '+(Number.isFinite(hz)?Math.round(hz)+'/':'')+roomState.host.fps+' Hz game'+(roomState.host.multitap==='none'?'':' · '+roomState.host.multitap+' multitap');if(roomState.host.console){$('pad-label').textContent='KEYBOARD → '+roomState.host.pad.toUpperCase();setAnalog(!!roomState.host.analog);$('game-label').textContent='ORIGINAL '+roomState.host.console+' GAME · BROWSER STREAMING';}if(roomState.host.error&&roomState.host.game)message('The emulator stopped: '+roomState.host.error);renderDiagnostics();}
   catch(e){message(e.message);}finally{polling=false;}
 }
 async function leaveRoom(notify=true){
@@ -72,6 +100,7 @@ async function leaveRoom(notify=true){
   incoming.getTracks().forEach(t=>{t.stop();incoming.removeTrack(t);});video.srcObject=null;
   incomingAudio.getTracks().forEach(t=>{t.stop();incomingAudio.removeTrack(t);});rtcAudio.srcObject=null;rtcAudio.muted=true;
   lastSentMask=null;lastSentAt=0;receiverBufferMs=null;receivedToDisplayMs=null;previousJitter=null;
+  pickerOpen=false;library=null;bootChosen=false;$('change-game').hidden=true;
   $('join-panel').hidden=false;$('game-picker').hidden=true;$('loading').hidden=true;$('join').disabled=false;$('sound').disabled=true;$('leave').disabled=true;
   $('screen').classList.remove('playing');
   $('stream-info').textContent='Waiting for a stream';document.querySelector('.live').classList.remove('active');connected('Not connected');renderSlots();
@@ -163,6 +192,11 @@ $('join-form').addEventListener('submit',async event=>{
   }catch(error){await leaveRoom(false);message(error.message);}finally{joining=false;}
 });
 $('leave').addEventListener('click',()=>leaveRoom());
+$('change-game').addEventListener('click',()=>{clearInput();pickerOpen=true;library=null;renderGame();});
+$('boot-screen').addEventListener('change',()=>{bootChosen=true;});
+$('close-picker').addEventListener('click',()=>{pickerOpen=false;renderGame();});
+$('stop-game').addEventListener('click',async()=>{if(!confirm('Stop '+roomState.host.game.title+' for everyone? Its memory card is saved.'))return;try{clearInput();await api('game/stop',{});pickerOpen=false;}catch(e){message(e.message);}await refresh();});
+$('admin').addEventListener('submit',async event=>{event.preventDefault();try{await api('admin',{pin:$('admin-pin').value});$('admin-pin').value='';await refresh();}catch(e){message(e.message);}});
 $('spectate').addEventListener('click',async()=>{try{clearInput();await api('release',{});await refresh();message('You are watching. Choose an open slot to play.');}catch(e){message(e.message);}});
 $('sound').addEventListener('click',async()=>{muted=!muted;rtcAudio.muted=muted;try{
   if(transport==='websocket'){
