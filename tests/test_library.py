@@ -150,3 +150,20 @@ class LibraryApiTests(IsolatedAsyncioTestCase):
             joined = await (await client.post('/api/join', json=dict(pin='qa-canyon', name='Ann'))).json()
             body = await (await client.get('/api/library', headers=dict(Authorization='Bearer '+joined['token']))).json()
             self.assertEqual(body, dict(consoles=[]))
+
+    def test_boot_screen_is_offered_where_this_host_can_show_it(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            host = Host(temporary)
+            host.core('pcsx_rearmed')
+            host.core('pcsx2')
+            host.core('play')
+            host.file('ps1/Puzzle.pbp')
+            host.file('ps2/Demo.elf')
+            library = host.scan()
+            self.assertFalse(console(library, 'ps1')['bootScreen'], 'the HLE BIOS has no boot screen')
+            self.assertFalse(console(library, 'ps2')['bootScreen'], 'Play! has none')
+            host.bios('scph1001.bin')
+            host.bios('pcsx2/bios/console.bin')
+            library = host.scan()
+            self.assertTrue(console(library, 'ps1')['bootScreen'])
+            self.assertTrue(console(library, 'ps2')['bootScreen'])

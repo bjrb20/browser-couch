@@ -25,6 +25,7 @@ class Profile:
     extensions: tuple = ()  # game files the library lists; files a CUE or M3U names are left out
     bios_files: tuple = ()  # BIOS dumps the core looks for in runtime/system itself, when it has no folder
     library_options: tuple = ()  # KEY=VALUE core options for library games, which each get a save folder
+    boot_options: tuple = ()  # KEY=VALUE core options that play the console's own boot screen first
 
     def options(self, multitap=None, overrides=()):
         """Core option values for this session, with KEY=VALUE overrides applied last."""
@@ -35,6 +36,12 @@ class Profile:
             key, _, value = override.partition('=')
             values[key] = value.encode()
         return values
+
+    def boot_screen(self, system):
+        """The options that show the console's boot screen, or () when this host cannot show it."""
+        if self.bios_files and self.missing_bios(system):
+            return ()  # the built-in HLE BIOS has no boot screen
+        return self.boot_options
 
     def missing_bios(self, system, where=None):
         """Return a message when the console's BIOS directory has no dump, else None.
@@ -66,6 +73,8 @@ PROFILES = {profile.key: profile for profile in (
         },
         multitap='pcsx_rearmed_multitap', multitaps=('port 1', 'disabled', 'port 2', 'ports 1 and 2'),
         library='ps1', extensions=('.cue', '.chd', '.pbp', '.m3u'),
+        # The original licence screen; "enabled" would add the core's own name to it.
+        boot_options=('pcsx_rearmed_show_bios_bootlogo=enabled_no_pcsx',),
         # The names PCSX ReARMed tries first. Without one it uses its built-in HLE BIOS.
         bios_files=('scph5500.bin', 'scph5501.bin', 'scph5502.bin', 'psxonpsp660.bin',
                     'scph101.bin', 'scph7001.bin', 'scph1001.bin'),
@@ -90,6 +99,7 @@ PROFILES = {profile.key: profile for profile in (
         library='ps2', extensions=('.iso', '.chd', '.cso', '.cue', '.elf'),
         # Memory cards in the game's own save folder, not one pair shared by every game.
         library_options=('pcsx2_shared_memory_cards=disabled',),
+        boot_options=('pcsx2_fastboot=disabled',),
         bios_hint='Copy a dump of your own console BIOS there (for example SCPH-70012.bin).',
     ),
     # Play! boots homebrew ELFs without a BIOS (built-in HLE), but draws only

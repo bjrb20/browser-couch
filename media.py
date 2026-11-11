@@ -59,7 +59,8 @@ class GameAudio(AudioStreamTrack):
         self.stall = stall
         self.start = None
         self.pts = None
-        self.rate = None  # the track's rate: the first game's, kept when the host switches games
+        # The track's rate: the game's at the start, kept when the host switches games.
+        self.rate = emulator.sample_rate
         self.resampler = None
         self.resampled = bytearray()
 
@@ -83,8 +84,6 @@ class GameAudio(AudioStreamTrack):
 
     async def recv(self):
         source = self.emulator.sample_rate
-        if self.rate is None:
-            self.rate = source
         rate = self.rate
         samples = rate // 50
         deadline = time.monotonic()+self.stall

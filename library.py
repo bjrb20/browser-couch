@@ -117,7 +117,8 @@ class Library:
                 continue
             profile, host_warning, warning = choose(profiles, self.system, self.cores, self.system_name)
             entry = dict(id=console, name=profiles[0].name, available=profile is not None,
-                         warning=warning, games=[])
+                         warning=warning, bootScreen=bool(profile and profile.boot_screen(self.system)),
+                         games=[])
             listing.append(entry)
             self.warnings[console] = host_warning
             if not profile:

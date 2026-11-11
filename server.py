@@ -168,7 +168,8 @@ class Room:
             if self.scanned_at is None or time.monotonic()-self.scanned_at > 10:
                 await asyncio.to_thread(self.library.scan)
                 self.scanned_at = time.monotonic()
-        return web.json_response(self.library.public())
+        return web.json_response(dict(self.library.public(),
+                                      bootScreen=bool(self.launcher and self.launcher.boot_screen)))
 
     async def admin(self, request):
         """Unlock game picking for this player with the --admin-pin."""
@@ -204,7 +205,9 @@ class Room:
             _, players, _ = self.launcher.plan(game)
             self.hub.resize(players)
             try:
-                await self.session.load(self.launcher.emulator(game, self.hub), game.title, game.id)
+                boot = body.get('bootScreen')
+                emulator = self.launcher.emulator(game, self.hub, boot if isinstance(boot, bool) else None)
+                await self.session.load(emulator, game.title, game.id)
             except RuntimeError as error:
                 print(error, flush=True)
                 raise web.HTTPInternalServerError(text=str(error)) from error
@@ -349,7 +352,7 @@ class Room:
             client['ws'] = ws
             client['seen'] = time.monotonic()
             audio = self.relay.subscribe(self.audio, buffered=False)
-            await ws.send_json(dict(t='ready', sampleRate=self.session.sample_rate))
+            await ws.send_json(dict(t='ready', sampleRate=self.audio.rate))
 
             async def video_loop():
                 while not ws.closed:
@@ -498,6 +501,9 @@ def main():
     parser.add_argument('--host', default='127.0.0.1', help='Use 0.0.0.0 to accept LAN browsers')
     parser.add_argument('--port', type=int, default=8081)
     parser.add_argument('--pin', help='Room access code; generated if omitted')
+    parser.add_argument('--boot-screen', action=argparse.BooleanOptionalAction, default=True,
+                        help="Library games: play the console's boot screen before the game, where the core "
+                             'can (PS1 with a real BIOS, PS2 on PCSX2). Players can still untick it per game')
     parser.add_argument('--admin-pin', help='PIN a player enters before choosing games; '
                                             'without it, every player in the room may choose')
     parser.add_argument('--ice-config', type=Path, help='JSON array of standard WebRTC ICE servers; default LAN-only host candidates')
@@ -555,7 +561,8 @@ def main():
     print('One shared game. Ctrl+C stops the host and saves the memory card.', flush=True)
     web.run_app(make_app(Room(
         session, pin, ice, args.udp_ports, library,
-        Launcher(args.system, args.saves, ROOT/'runtime/cores', args.players, tuple(args.core_option)),
+        Launcher(args.system, args.saves, ROOT/'runtime/cores', args.players, tuple(args.core_option),
+                 args.boot_screen),
         args.admin_pin)), host=args.host, port=args.port,
                 ssl_context=context, access_log=None)
 

@@ -16,7 +16,7 @@ from systems import PROFILES
 # The page background (#0c1216), so an idle stream blends into the page.
 IDLE_FRAME = np.empty((480, 640, 3), dtype=np.uint8)
 IDLE_FRAME[:] = (12, 18, 22)
-IDLE_RATE = 44100
+IDLE_RATE = 48000  # the Opus rate: a room that starts idle resamples only 44.1 kHz games
 
 
 @dataclass
@@ -27,6 +27,7 @@ class Launcher:
     cores: Path
     players: int | None = None  # --players; default: each console's own
     options: tuple = ()  # --core-option KEY=VALUE, for every console
+    boot_screen: bool = True  # --no-boot-screen; a pick can still choose either
 
     def plan(self, game):
         """Core path, players and multitap for a game. A PS2 multitap needs its own core build."""
@@ -45,12 +46,14 @@ class Launcher:
         """One folder per game: its memory cards and saves stay apart from every other game's."""
         return Path(self.saves)/game.console/f'{game.title} [{game.id[:8]}]'
 
-    def emulator(self, game, hub):
+    def emulator(self, game, hub, boot_screen=None):
         """Build (not start) the game's emulator. Resize the hub first: the emulator reads its slot count."""
         core, players, multitap = self.plan(game)
         profile = PROFILES[game.profile]
+        boot = profile.boot_screen(self.system) if (self.boot_screen if boot_screen is None else boot_screen) else ()
+        # --core-option comes last, so the host can still override any of these.
         return Emulator(core, game.path, self.system, self.save_folder(game), hub, multitap, None,
-                        profile, (*profile.library_options, *self.options))
+                        profile, (*profile.library_options, *boot, *self.options))
 
 
 class Session:

@@ -38,7 +38,7 @@ class FakeEmulator:
         return dict(core='Fake', error=None)
 
     def audio_queued(self):
-        return 10**6
+        return 0  # the track waits out its stall each chunk, as with a paused core
 
     def audio_frame(self, count):
         return b'\x10\x00\x20\x00'*count
@@ -52,8 +52,9 @@ class FakeLauncher(Launcher):
     def plan(self, game):
         return None, 2 if game.console == 'ps2' else 4, None
 
-    def emulator(self, game, hub):
+    def emulator(self, game, hub, boot_screen=None):
         self.built.append(hub.players)
+        self.boot = boot_screen
         return FakeEmulator(self.log, game.title, **self.kwargs.get(game.title, {}))
 
 
@@ -142,6 +143,26 @@ class SwitchTests(IsolatedAsyncioTestCase):
         gate.set()
         self.assertEqual((await first).status, 200)
 
+    async def test_a_pick_can_skip_the_boot_screen(self):
+        room, client = await self.room()
+        _, auth = await self.join(client)
+        body = await (await client.get('/api/library', headers=auth)).json()
+        self.assertTrue(body['bootScreen'], 'on by default')
+        await client.post('/api/game', json=dict(id=self.ids['Demo'], bootScreen=False), headers=auth)
+        self.assertIs(self.launcher.boot, False)
+        await client.post('/api/game', json=dict(id=self.ids['Demo'], bootScreen='yes'), headers=auth)
+        self.assertIsNone(self.launcher.boot, 'anything else means the host default')
+
+    async def test_the_fallback_stream_announces_the_rate_it_sends(self):
+        room, client = await self.room()
+        token, auth = await self.join(client)
+        await client.post('/api/game', json=dict(id=self.ids['Canyon Racer']), headers=auth)  # a 44.1 kHz game
+        async with client.ws_connect('/api/socket') as ws:
+            await ws.send_json(dict(token=token))
+            ready = await ws.receive_json()
+            self.assertEqual(ready['sampleRate'], room.audio.rate)
+            self.assertNotEqual(ready['sampleRate'], room.session.sample_rate, 'the room started idle')
+
     async def test_unknown_game_and_no_library(self):
         room, client = await self.room()
         _, auth = await self.join(client)
@@ -219,10 +240,40 @@ class LauncherTests(TestCase):
         self.assertEqual(emulator.saves.name, 'Demo [01234567]')
 
 
+class BootScreenTests(TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.system = Path(self.temporary.name)
+
+    def options(self, profile, console, **kwargs):
+        launcher = Launcher(self.system, self.system/'saves', self.system, **kwargs)
+        game = Game('0123456789abcdef', 'Demo', console, profile, Path('game'))
+        return launcher.emulator(game, InputHub(2)).variables
+
+    def test_ps1_shows_the_bios_licence_screen_only_with_a_real_bios(self):
+        self.assertEqual(self.options('ps1', 'ps1').get('pcsx_rearmed_show_bios_bootlogo'), None)
+        (self.system/'scph1001.bin').write_bytes(b'')
+        self.assertEqual(self.options('ps1', 'ps1')['pcsx_rearmed_show_bios_bootlogo'], b'enabled_no_pcsx')
+
+    def test_ps2_turns_fast_boot_off_unless_unticked(self):
+        self.assertEqual(self.options('ps2', 'ps2')['pcsx2_fastboot'], b'disabled')
+        self.assertEqual(self.options('ps2', 'ps2', boot_screen=False)['pcsx2_fastboot'], b'enabled')
+        launcher = Launcher(self.system, self.system, self.system)
+        game = Game('0123456789abcdef', 'Demo', 'ps2', 'ps2', Path('game'))
+        self.assertEqual(launcher.emulator(game, InputHub(2), False).variables['pcsx2_fastboot'], b'enabled')
+        self.assertEqual(Launcher(self.system, self.system, self.system, boot_screen=False)
+                         .emulator(game, InputHub(2), True).variables['pcsx2_fastboot'], b'disabled')
+
+    def test_host_core_options_still_win(self):
+        variables = self.options('ps2', 'ps2', options=('pcsx2_fastboot=enabled',))
+        self.assertEqual(variables['pcsx2_fastboot'], b'enabled')
+
+
 class AudioRateSwitchTests(IsolatedAsyncioTestCase):
     async def test_the_track_keeps_its_rate_when_the_next_game_has_another(self):
         source = FakeEmulator([], 'Demo', 44100)
-        audio, encoder = GameAudio(source), OpusEncoder()
+        audio, encoder = GameAudio(source, stall=.001), OpusEncoder()
         for _ in range(3):
             encoder.encode(await audio.recv())
         source.sample_rate = 48000
