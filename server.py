@@ -9,6 +9,7 @@ import io
 import ipaddress
 import json
 import logging
+import os
 from pathlib import Path
 import secrets
 import ssl
@@ -536,12 +537,14 @@ def main():
                         help='Override a core option, for example pcsx2_renderer=OpenGL')
     parser.add_argument('--host', default='127.0.0.1', help='Use 0.0.0.0 to accept LAN browsers')
     parser.add_argument('--port', type=int, default=8081)
-    parser.add_argument('--pin', help='Room access code; generated if omitted')
+    parser.add_argument('--pin', default=os.environ.get('SOFA_PIN') or None,
+                        help='Room access code; default: $SOFA_PIN, else generated')
     parser.add_argument('--boot-screen', action=argparse.BooleanOptionalAction, default=True,
                         help="Library games: play the console's boot screen before the game, where the core "
                              'can (PS1 with a real BIOS, PS2 on PCSX2). Players can still untick it per game')
-    parser.add_argument('--admin-pin', help='PIN a player enters before choosing games; '
-                                            'without it, every player in the room may choose')
+    parser.add_argument('--admin-pin', default=os.environ.get('SOFA_ADMIN_PIN') or None,
+                        help='PIN a player enters before choosing games (default: $SOFA_ADMIN_PIN); '
+                             'without it, every player in the room may choose')
     parser.add_argument('--ice-config', type=Path, help='JSON array of standard WebRTC ICE servers; default LAN-only host candidates')
     parser.add_argument('--udp-ports', type=port_range, metavar='FIRST-LAST',
                         help='Bind WebRTC media to this UDP port range, for a firewall or tailnet ACL rule')
@@ -596,7 +599,8 @@ def main():
             count = f"{len(console['games'])} games" if console['available'] else 'cannot run'
             print(f"Library: {console['name']}: {count}"
                   + (f" | {library.warnings[console['id']]}" if library.warnings[console['id']] else ''), flush=True)
-    print(f'Room code: {pin}', flush=True)
+    # A code from the environment stays out of the log, which others may read.
+    print('Room code: set by SOFA_PIN' if pin == os.environ.get('SOFA_PIN') else f'Room code: {pin}', flush=True)
     print('One shared game. Ctrl+C stops the host and saves the memory card.', flush=True)
     web.run_app(make_app(Room(
         session, pin, ice, args.udp_ports, library,
