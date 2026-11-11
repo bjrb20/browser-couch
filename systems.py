@@ -21,6 +21,9 @@ class Profile:
     pad: str = 'pad'
     analog: bool = False  # the pad has sticks; the page then sends them
     multitap_core: str = ''  # a core build that reads the multitap slots, when the usual one does not
+    library: str = ''  # the --library subfolder for this console's games
+    extensions: tuple = ()  # game files the library lists; files a CUE or M3U names are left out
+    bios_files: tuple = ()  # BIOS dumps the core looks for in runtime/system itself, when it has no folder
 
     def options(self, multitap=None, overrides=()):
         """Core option values for this session, with KEY=VALUE overrides applied last."""
@@ -32,14 +35,21 @@ class Profile:
             values[key] = value.encode()
         return values
 
-    def missing_bios(self, system):
-        """Return a message when the console's BIOS directory has no dump, else None."""
+    def missing_bios(self, system, where=None):
+        """Return a message when the console's BIOS directory has no dump, else None.
+
+        `where` replaces the folder path in the message, for a reader who must not see host paths.
+        """
+        if self.bios_files:
+            if any((Path(system)/name).is_file() for name in self.bios_files):
+                return None
+            return f'No {self.name} BIOS found in {where or Path(system)}. {self.bios_hint}'
         if not self.bios:
             return None
         directory = Path(system)/self.bios
         if directory.is_dir() and any(p.is_file() and not p.name.startswith('.') for p in directory.iterdir()):
             return None
-        return f'No {self.name} BIOS found in {directory}. {self.bios_hint}'
+        return f'No {self.name} BIOS found in {where or directory}. {self.bios_hint}'
 
 
 PROFILES = {profile.key: profile for profile in (
@@ -54,6 +64,12 @@ PROFILES = {profile.key: profile for profile in (
             'pcsx_rearmed_bios': 'auto',
         },
         multitap='pcsx_rearmed_multitap', multitaps=('port 1', 'disabled', 'port 2', 'ports 1 and 2'),
+        library='ps1', extensions=('.cue', '.chd', '.pbp', '.m3u'),
+        # The names PCSX ReARMed tries first. Without one it uses its built-in HLE BIOS.
+        bios_files=('scph5500.bin', 'scph5501.bin', 'scph5502.bin', 'psxonpsp660.bin',
+                    'scph101.bin', 'scph7001.bin', 'scph1001.bin'),
+        bios_hint='The built-in HLE BIOS runs most games but can freeze some. '
+                  'Copy a dump of your own console BIOS there (for example scph1001.bin).',
     ),
     # PCSX2 (the libretro "ParaLLEl PS2" build). It refuses to start without a
     # BIOS. The software renderer draws on the CPU and returns a plain
@@ -70,6 +86,7 @@ PROFILES = {profile.key: profile for profile in (
         multitap='pcsx2_multitap', multitaps=('disabled', 'port 1', 'port 2', 'ports 1 and 2'),
         multitap_core='pcsx2_multitap',
         bios='pcsx2/bios', bios_required=True,
+        library='ps2', extensions=('.iso', '.chd', '.cso', '.cue', '.elf'),
         bios_hint='Copy a dump of your own console BIOS there (for example SCPH-70012.bin).',
     ),
     # Play! boots homebrew ELFs without a BIOS (built-in HLE), but draws only
@@ -79,5 +96,6 @@ PROFILES = {profile.key: profile for profile in (
         content='Path to a homebrew PS2 ELF or a PS2 disc image',
         max_players=2, default_players=2,
         platforms=('Linux',),
+        library='ps2', extensions=('.iso', '.chd', '.cso', '.cue', '.elf'),
     ),
 )}

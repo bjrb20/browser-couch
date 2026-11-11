@@ -22,6 +22,7 @@ from aiortc.contrib.media import MediaRelay
 from emulator import Emulator
 from fetch_core import core_filename
 from inputs import InputHub
+from library import Library
 from media import GameAudio, GameVideo
 from session import Session
 from systems import PROFILES
@@ -80,8 +81,11 @@ def host_ice_servers(servers):
 
 
 class Room:
-    def __init__(self, session, pin, ice_servers=None, udp_ports=None):
+    def __init__(self, session, pin, ice_servers=None, udp_ports=None, library=None):
         self.udp_ports = udp_ports
+        self.library = library
+        self.scanned_at = None
+        self.scan_lock = asyncio.Lock()
         self.session = session
         self.hub = session.hub
         self.pin = pin
@@ -140,6 +144,17 @@ class Room:
                                       inputPollMs=self.hub.timing(token),
                                       sourceFrameAgeMs=max(0, (time.monotonic()-captured)*1000) if captured else None,
                                       viewers=len(self.clients)))
+
+    async def games(self, request):
+        """The game library: console names, titles and ids only."""
+        self.authenticate(request)
+        if not self.library:
+            return web.json_response(dict(consoles=[]))
+        async with self.scan_lock:
+            if self.scanned_at is None or time.monotonic()-self.scanned_at > 10:
+                await asyncio.to_thread(self.library.scan)
+                self.scanned_at = time.monotonic()
+        return web.json_response(self.library.public())
 
     async def claim(self, request):
         token, client = self.authenticate(request)
@@ -388,6 +403,7 @@ def make_app(room):
                            ('release', room.release), ('leave', room.leave)]:
         app.router.add_post('/api/' + route, handler)
     app.router.add_get('/api/state', room.state)
+    app.router.add_get('/api/library', room.games)
     app.router.add_get('/api/socket', room.socket)
     async def index(request):
         return web.FileResponse(ROOT / 'web/index.html')
@@ -407,6 +423,8 @@ def main():
     parser.add_argument('--disc', help='PS1: the original CUE with all referenced BIN tracks. '
                         'PS2: an ISO/CHD/CSO/CUE disc image or a homebrew ELF. '
                         'Omit it to start the room with no game')
+    parser.add_argument('--library', type=Path, metavar='DIR',
+                        help='Game folder with one subfolder per console: ps1, ps2')
     parser.add_argument('--system', default=str(ROOT/'runtime/system'))
     parser.add_argument('--saves', default=str(ROOT/'runtime/saves'))
     parser.add_argument('--state', help='Optional host-side emulator snapshot to restore')
@@ -443,6 +461,9 @@ def main():
         parser.error('Use a room code of at least six characters')
     if args.state and not args.disc:
         parser.error('--state needs --disc')
+    if args.library and not args.library.is_dir():
+        parser.error(f'No library folder at {args.library}')
+    library = Library(args.library, args.system, ROOT/'runtime/cores').scan() if args.library else None
     ice = json.loads(args.ice_config.read_text()) if args.ice_config else []
     logging.basicConfig(level=logging.WARNING)
     context = None
@@ -457,9 +478,14 @@ def main():
         print(f'Sofa Link host | {emulator.name} {emulator.version} | {emulator.renderer} video', flush=True)
     else:
         print('Sofa Link host | no game loaded', flush=True)
+    if library:
+        for console in library.consoles:
+            count = f"{len(console['games'])} games" if console['available'] else 'cannot run'
+            print(f"Library: {console['name']}: {count}"
+                  + (f" | {library.warnings[console['id']]}" if library.warnings[console['id']] else ''), flush=True)
     print(f'Room code: {pin}', flush=True)
     print('One shared game. Ctrl+C stops the host and saves the memory card.', flush=True)
-    web.run_app(make_app(Room(session, pin, ice, args.udp_ports)), host=args.host, port=args.port,
+    web.run_app(make_app(Room(session, pin, ice, args.udp_ports, library)), host=args.host, port=args.port,
                 ssl_context=context, access_log=None)
 
 

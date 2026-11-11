@@ -300,6 +300,30 @@ running. Ctrl+C stops the game and saves the emulated memory card in
 Without `--disc`, the host starts with no game. Players can still join and
 take slots, and the page asks for a console and a game.
 
+### Game library
+
+`--library DIR` lists the games in `DIR`, with one subfolder per console:
+
+```text
+DIR/ps1/Canyon Racer/GAME.cue   with its BIN tracks
+DIR/ps1/Saga.m3u                for a multi-disc game, with its discs
+DIR/ps2/Demo.iso                ISO, CHD, CSO, CUE or a homebrew ELF
+```
+
+The PS1 folder lists CUE, CHD, PBP and M3U files. The tracks that a CUE
+names and the discs that an M3U names are not listed separately. A game alone
+in its own folder takes the folder's name. Files and folders that start with
+a dot are skipped.
+
+The host prints each console and its number of games at startup. A console
+whose core is missing, whose core does not run on this platform, or whose
+required BIOS is missing lists no games, only a warning. PS2 games use PCSX2
+when its BIOS is present, otherwise Play!. A PS1 without a BIOS runs on the
+core's built-in HLE BIOS, with a warning.
+
+Browsers get only the console names, game titles and ids. They never get
+file paths, discs, ROMs or BIOS files.
+
 The initial test used the core's built-in HLE BIOS, which froze a game when a
 two-player session started. Put a compatible BIOS dump (for example
 `scph1001.bin`, lowercase) in `runtime/system/`; the core selects it
