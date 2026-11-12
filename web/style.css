@@ -114,6 +114,10 @@ body[data-player="2"]{--me:var(--p2)}body[data-player="3"]{--me:var(--p3)}body[d
 .game.watched{outline:2px dashed var(--p2);outline-offset:2px}
 .game.chosen{outline:3px solid var(--green);outline-offset:2px}
 .activity-choosing button{margin-left:auto;padding:6px 10px;font-size:10px;flex:none}
+.activity-choosing .activity-text>span{color:inherit;font-size:12px}
+.activity-choosing .activity-text small{font-family:inherit;font-size:11px;letter-spacing:0;color:var(--muted);overflow-wrap:anywhere}
+.activity-choosing .activity-text small b{color:var(--text,#e8f0f2);font-weight:600}
+.activity-choosing.compact{border-left:3px solid var(--p2)}
 /* Watching the chooser's picker: read-only, with their pointer as a labelled ghost. */
 .picker-card.mirrored #library,.picker-card.mirrored #picker-tools{cursor:default}
 .ghost{position:absolute;left:0;top:0;z-index:5;pointer-events:none;display:flex;align-items:flex-start;transition:transform 70ms linear;will-change:transform}

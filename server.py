@@ -43,6 +43,7 @@ STARTED_FOR = 3  # seconds "Starting" stays after the game is up, when there is 
 STOPPED_FOR = 6  # seconds everyone sees that a game was stopped
 # The chooser's picker, shown read-only to everyone else.
 MIRROR_FOR = 5  # seconds a mirror lasts without news; the page sends at least every 2
+MIRROR_PICKED = 3  # seconds a pick stays picked out for viewers before "Starting" takes over
 MIRROR_RATE = 25  # updates a second from the chooser, at most; the page sends at most 20
 MIRROR_SEARCH = 40  # characters of search text
 LAYOUT = re.compile(r'[pd][0-9]{1,2}')  # phone or desktop, and how many columns of cards
@@ -127,6 +128,7 @@ class Room:
         self.choosers = {}  # token -> {until}: players with the game picker open
         # The chooser's picker, for others to watch. Its number only grows, even across restarts, so a page
         # can drop an update older than one it has.
+        # Each choosing session has its own id, so a page can keep one dismissed until the next.
         self.mirror, self.mirror_n, self.sends = None, time.time_ns() // 1_000_000, set()
         self.change = None  # {kind: starting or stopped, game, by, until}: what everyone sees as games change
 
@@ -244,8 +246,8 @@ class Room:
             return
         calls.append(now)
         current = self.live_mirror()
-        if current and current['owner'] != token:
-            return
+        if current and (current['owner'] != token or current['s']['sel']) or self.session.lock.locked():
+            return  # someone else is choosing, or a pick is giving way to "Starting" (a late update must not undo it)
         state = data.get('s')
         if state is None:
             if current:
@@ -255,7 +257,7 @@ class Room:
             return
         self.mirror_n += 1
         self.mirror = dict(owner=token, name=client['name'], until=now+MIRROR_FOR, n=self.mirror_n,
-                           s=self.mirror_state(state))
+                           id=current['id'] if current else self.mirror_n, s=self.mirror_state(state))
         self.broadcast_mirror()
 
     def mirror_state(self, state):
@@ -284,6 +286,8 @@ class Room:
         mirror = self.mirror
         if mirror and (mirror['until'] < time.monotonic() or mirror['owner'] not in self.clients
                        or not self.can_pick(self.clients[mirror['owner']])):
+            if not mirror['s']['sel']:
+                self.choosers.pop(mirror['owner'], None)  # an open list reports every 2 seconds: its page has gone
             self.end_mirror()
         return self.mirror
 
@@ -292,17 +296,30 @@ class Room:
         self.mirror_n += 1
         self.broadcast_mirror()
 
+    def end_picked_mirror(self, n):
+        """Shortly after a pick, the mirror gives way to "Starting", unless the chooser has looked again."""
+        if self.mirror and self.mirror['n'] == n:
+            self.end_mirror()
+
+    def connection_lost(self, token):
+        """The chooser's connection dropped: everyone stops seeing them choose now, not when it goes quiet."""
+        self.choosers.pop(token, None)
+        if self.mirror and self.mirror['owner'] == token:
+            self.end_mirror()
+
     def mirror_view(self, token):
         """What the room state says about the mirror; its number lets a page drop an older update."""
         mirror = self.live_mirror()
         yours = bool(mirror) and mirror['owner'] == token
-        return dict(n=self.mirror_n, name=mirror['name'] if mirror else None, yours=yours,
+        return dict(n=self.mirror_n, id=mirror['id'] if mirror else None,
+                    name=mirror['name'] if mirror else None, yours=yours,
                     s=mirror['s'] if mirror and not yours else None)
 
     def broadcast_mirror(self):
         """Send the mirror to everyone but the chooser, over the channel each one already has."""
         mirror = self.mirror
-        text = json.dumps(dict(t='mirror', n=self.mirror_n, name=mirror['name'] if mirror else None,
+        text = json.dumps(dict(t='mirror', n=self.mirror_n, id=mirror['id'] if mirror else None,
+                               name=mirror['name'] if mirror else None,
                                s=mirror['s'] if mirror else None), separators=(',', ':'))
         for token, client in self.clients.items():
             if mirror and token == mirror['owner']:
@@ -530,9 +547,10 @@ class Room:
             if self.live_mirror() and self.mirror['owner'] == token:
                 # Everyone watching sees the chosen game picked out, then the mirror gives way to "Starting".
                 self.mirror_n += 1
-                self.mirror.update(until=time.monotonic()+3, n=self.mirror_n,
+                self.mirror.update(until=time.monotonic()+MIRROR_PICKED, n=self.mirror_n,
                                    s=dict(self.mirror['s'], h=game.id, sel=game.id))
                 self.broadcast_mirror()
+                asyncio.get_running_loop().call_later(MIRROR_PICKED, self.end_picked_mirror, self.mirror_n)
             cover = await asyncio.to_thread(self.covers.info, game) if self.covers else None
             self.change = dict(kind='starting', by=client['name'], until=None,
                                game=dict(id=game.id, title=game.name, console=game.console,
@@ -653,11 +671,14 @@ class Room:
             @channel.on('close')
             def channel_close():
                 self.hub.clear(token)
+                if client['channel'] in (channel, None):
+                    self.connection_lost(token)
 
         @pc.on('connectionstatechange')
         async def statechange():
             if pc.connectionState == 'failed':
                 self.hub.release(token)
+                self.connection_lost(token)
                 await self.close_peer(client)
             elif pc.connectionState == 'closed':
                 self.hub.release(token)
@@ -747,16 +768,18 @@ class Room:
         except (asyncio.TimeoutError, ValueError, TypeError):
             await ws.close(code=1008, message=b'Authentication required')
         finally:
-            for task in tasks:
-                task.cancel()
-            if tasks:
-                await asyncio.gather(*tasks, return_exceptions=True)
-            if audio:
-                audio.stop()
+            # The bookkeeping first: the handler may itself be cancelled while it waits below.
             self.sockets.discard(ws)
             if client and client['ws'] is ws:
                 client['ws'] = None
                 self.hub.release(token)
+                self.connection_lost(token)
+            for task in tasks:
+                task.cancel()
+            if audio:
+                audio.stop()
+            if tasks:
+                await asyncio.gather(*tasks, return_exceptions=True)
         return ws
 
     async def sweep(self):

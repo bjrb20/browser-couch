@@ -4,7 +4,7 @@ from pathlib import Path
 import tempfile
 import threading
 import time
-from unittest import IsolatedAsyncioTestCase, TestCase
+from unittest import IsolatedAsyncioTestCase, TestCase, mock
 
 import aiohttp
 from aiohttp.test_utils import TestClient, TestServer
@@ -14,6 +14,7 @@ from fetch_core import core_filename
 from inputs import InputHub
 from library import Game, Library
 from media import GameAudio
+import server
 from server import STARTED_FOR, Room, make_app
 from session import Launcher, Session
 
@@ -400,6 +401,43 @@ class MirrorTests(IsolatedAsyncioTestCase):
         numbers = [m['n'] for m in self.seen(room, bob)]
         self.assertEqual(numbers, sorted(set(numbers)))
 
+    async def test_a_choosing_session_keeps_its_id_until_it_ends(self):
+        room, client, (ann, bob) = await self.players()
+        self.push(room, ann, self.view(q='a'))
+        self.push(room, ann, self.view(q='ab'))
+        first = [m['id'] for m in self.seen(room, bob)]
+        self.assertEqual(len(set(first)), 1, 'one id for the whole session, so a page can keep it hidden')
+        self.push(room, ann, None)
+        self.assertIsNone(self.seen(room, bob)[-1]['id'])
+        self.push(room, ann, self.view(q='b'))
+        self.assertNotEqual(self.seen(room, bob)[-1]['id'], first[0], 'the next session opens again')
+        state = await (await client.get('/api/state', headers=dict(Authorization='Bearer '+bob))).json()
+        self.assertEqual(state['mirror']['id'], self.seen(room, bob)[-1]['id'], 'a player joining now sees it')
+
+    async def test_it_ends_at_once_when_the_chooser_connection_drops(self):
+        room, client = await self.room()
+        ann, _ = await self.join(client)
+        bob, _ = await self.join(client, 'Bob')
+        room.clients[bob]['channel'] = FakeChannel()
+        await client.post('/api/picker', json=dict(open=True), headers=dict(Authorization='Bearer '+ann))
+        self.assertEqual([c['name'] for c in room.choosing(bob)], ['Ann'])
+        async with client.ws_connect('/api/socket') as chooser:
+            await chooser.send_json(dict(token=ann))
+            self.assertEqual((await self.text(chooser))['t'], 'ready')
+            await chooser.send_json(dict(t='mirror', s=self.view(q='ruins')))
+            for _ in range(50):
+                if room.mirror:
+                    break
+                await asyncio.sleep(0.01)
+            self.assertEqual(room.mirror['name'], 'Ann')
+        started = time.monotonic()
+        while room.mirror and time.monotonic()-started < 3:
+            await asyncio.sleep(0.01)
+        self.assertLess(time.monotonic()-started, 3, 'well before the 5 seconds of quiet')
+        self.assertIsNone(room.mirror)
+        self.assertIsNone(room.clients[bob]['channel'].sent[-1]['s'])
+        self.assertEqual(room.choosing(bob), [], 'nor is Ann still shown choosing')
+
     async def test_it_clears_on_close_leave_timeout_and_lost_right(self):
         room, client, (ann, bob) = await self.players(admin_pin='4321')
         room.clients[ann]['admin'] = True
@@ -407,10 +445,12 @@ class MirrorTests(IsolatedAsyncioTestCase):
         self.push(room, ann, None)
         self.assertIsNone(self.seen(room, bob)[-1]['s'])
 
+        room.choosers[ann] = dict(until=time.monotonic()+60)
         self.push(room, ann, self.view())
         room.mirror['until'] = 0  # its page went quiet
         self.assertIsNone(room.mirror_view(bob)['s'])
         self.assertIsNone(self.seen(room, bob)[-1]['s'])
+        self.assertEqual(room.choosing(bob), [], 'a page that went quiet is not shown choosing either')
 
         self.push(room, ann, self.view())
         room.clients[ann]['admin'] = False
@@ -430,6 +470,20 @@ class MirrorTests(IsolatedAsyncioTestCase):
         self.assertEqual(response.status, 200)
         sent = [m['s'] for m in self.seen(room, bob) if m['s']]
         self.assertEqual((sent[-1]['sel'], sent[-1]['h']), (self.ids['Demo'], self.ids['Demo']))
+
+    async def test_after_a_pick_it_ends_by_itself_and_the_next_look_is_a_new_session(self):
+        room, client, (ann, bob) = await self.players()
+        with mock.patch.object(server, 'MIRROR_PICKED', 0.3):
+            self.push(room, ann, self.view())
+            picked = self.seen(room, bob)[-1]['id']
+            await client.post('/api/game', json=dict(id=self.ids['Demo']), headers=dict(Authorization='Bearer '+ann))
+            self.push(room, ann, self.view(h=self.ids['Canyon Racer']))  # sent just before the pick, arriving after it
+            self.assertEqual(self.seen(room, bob)[-1]['s']['sel'], self.ids['Demo'], 'a late update does not undo the pick')
+            await asyncio.sleep(0.5)
+        self.assertIsNone(room.mirror, 'nobody has to ask for the state for it to end')
+        self.assertIsNone(self.seen(room, bob)[-1]['s'])
+        self.push(room, ann, self.view())
+        self.assertNotEqual(self.seen(room, bob)[-1]['id'], picked, 'a page that hid the last one shows this one')
 
     async def test_over_the_websocket_and_a_pin_typed_on_the_page_never_reaches_a_viewer(self):
         room, client = await self.room(admin_pin='4321')

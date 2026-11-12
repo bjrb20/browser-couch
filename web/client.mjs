@@ -242,7 +242,7 @@ let pickerSent={open:false,at:0},pickerTouched=0,activityArt={key:'',url:null};
 for(const type of ['pointerdown','keydown','input','focusin','mouseover'])$('game-picker').addEventListener(type,()=>{if(!mirrorShown)pickerTouched=performance.now();},{passive:true});
 function choosingOpen(){
   const using=pickerOpen||performance.now()-pickerTouched<20000;
-  return Boolean(token&&roomState?.canPick&&!roomState.host.loading&&!picking&&!watching&&!mirrorShown&&using&&!$('game-picker').hidden&&document.visibilityState==='visible');
+  return Boolean(token&&roomState?.canPick&&!roomState.host.loading&&!picking&&!mirrorShown&&using&&!$('game-picker').hidden&&document.visibilityState==='visible');
 }
 function reportPicker(){
   const open=choosingOpen(),at=performance.now();mirrorTick(open);
@@ -288,17 +288,44 @@ pickerCard.addEventListener('pointerleave',()=>{mirrorOut.p=mirrorOut.o=mirrorOu
 pickerCard.addEventListener('scroll',mirrorSoon,{passive:true});
 $('library').addEventListener('focusin',mirrorSoon);$('library').addEventListener('focusout',mirrorSoon);
 $('game-search').addEventListener('input',mirrorSoon);
-// Watching: the chooser's picker, read-only, in this page's own picker. It shows by itself to a player who
-// cannot choose while no game runs; anyone else opens it with "Watch". A different layout (a phone watching
-// a desktop) follows the chooser by game card rather than by position.
-let mirrorIn=null,mirrorShown=false,mirrorOwn=null,watching=false,watchOpened=false,watchClose=null;
+// Watching: the chooser's list opens by itself for everyone else, and closes when they close it, pick or drop.
+// - full: read-only in this page's own games list, with their pointer. Only while no game runs, and not
+//   while this player is typing or using their own list: that is never taken from them.
+// - compact: a small panel in the activity strip, never over the stream or the touch controls, and no input
+//   is held back from the game.
+// - min: one line, once this player has hidden it; the next choosing session opens again.
+// A different layout (a phone watching a desktop) follows the chooser by game card rather than by position.
+let mirrorIn=null,mirrorShown=false,mirrorOwn=null,mirrorHidden=null,mirrorTitles={at:-1e9,games:{}},pickerUsed=-1e9;
+// Using one's own list is a click, a key, typing or scrolling it, not a pointer resting over it.
+for(const type of ['pointerdown','keydown','input','wheel'])$('game-picker').addEventListener(type,()=>{if(!mirrorShown)pickerUsed=performance.now();},{passive:true});
 function mirrorReceive(data){
   if(!data||!Number.isInteger(data.n)||mirrorIn&&data.n<=mirrorIn.n)return;
-  const had=Boolean(mirrorIn?.s);mirrorIn={n:data.n,name:data.name,s:data.s||null};
-  if(had&&!mirrorIn.s&&watching)stopWatching();else drawMirror();
-  renderActivity();
+  mirrorIn={n:data.n,id:data.id??null,name:data.name,s:data.s||null};
+  drawMirror();renderActivity();
 }
-function mirrorWanted(){return Boolean(mirrorIn?.s&&token&&roomState&&!$('game-picker').hidden&&(watching||!roomState.canPick&&!roomState.host.game));}
+function typingHere(){
+  const el=document.activeElement;if(!el||mirrorShown&&$('picker-tools').contains(el))return false;
+  return el.isContentEditable||el.tagName==='TEXTAREA'||el.tagName==='SELECT'||el.tagName==='INPUT'&&!/^(button|checkbox|radio|submit|reset|range|file)$/.test(el.type);
+}
+function mirrorMode(){
+  const s=mirrorIn?.s;if(!s||!token||!roomState)return '';
+  if(s.sel)return mirrorShown?'full':'';  // "Starting" says it now
+  if(mirrorHidden===mirrorIn.id)return 'min';
+  const busy=typingHere()||!mirrorShown&&($('game-picker').contains(document.activeElement)||performance.now()-pickerUsed<5000);
+  return !roomState.host.game&&!roomState.host.loading&&!$('game-picker').hidden&&!busy?'full':'compact';
+}
+function hideMirror(){mirrorHidden=mirrorIn?.id??null;drawMirror();renderActivity();}
+function showMirror(){mirrorHidden=null;drawMirror();renderActivity();}
+document.addEventListener('focusin',()=>{if(mirrorIn?.s){drawMirror();renderActivity();}});
+// Titles for the compact panel, when this page has not loaded the list itself.
+function mirrorTitle(id){
+  if(!id)return null;
+  for(const c of library?.consoles||[])for(const g of c.games)if(g.id===id)return {title:g.title,console:c.name};
+  if(!mirrorTitles.games[id]&&performance.now()-mirrorTitles.at>30000){mirrorTitles.at=performance.now();
+    api('library').then(body=>{const games={};for(const c of body.consoles||[])for(const g of c.games)games[g.id]={title:g.title,console:c.name};
+      mirrorTitles.games=games;renderActivity();}).catch(()=>{});}
+  return mirrorTitles.games[id]||null;
+}
 function revealInPicker(el){const c=pickerCard.getBoundingClientRect(),r=el.getBoundingClientRect();
   if(r.top<c.top+8)pickerCard.scrollTop-=c.top+8-r.top;else if(r.bottom>c.bottom-8)pickerCard.scrollTop+=r.bottom-c.bottom+8;}
 function placeGhost(s,target,same){
@@ -309,7 +336,7 @@ function placeGhost(s,target,same){
   ghost.lastElementChild.textContent=mirrorIn.name;ghost.hidden=false;ghost.style.transform=`translate(${Math.round(x-base.left)}px,${Math.round(y-base.top)}px)`;
 }
 function drawMirror(){
-  if(!mirrorWanted()){if(mirrorShown)unmirror();return;}
+  if(mirrorMode()!=='full'){if(mirrorShown)unmirror();return;}
   const s=mirrorIn.s;
   if(!mirrorShown){mirrorShown=true;mirrorOwn={q:$('game-search').value,c:consoleFilter,y:pickerCard.scrollTop};pickerCard.classList.add('mirrored');mirrorLock(true);}
   $('game-search').value=s.q;consoleFilter=library?.consoles.some(c=>c.id===s.c)?s.c:'all';filterLibrary();
@@ -320,8 +347,6 @@ function drawMirror(){
   if(same||!target){const room=pickerCard.scrollHeight-pickerCard.clientHeight;pickerCard.scrollTop=Math.round(s.y*room);}
   if(target&&(!same||s.sel))revealInPicker(target);
   placeGhost(s,target,same);
-  // The choice is picked out for a moment, then a watcher who opened this over a game goes back to it.
-  if(s.sel&&watchOpened&&!watchClose)watchClose=setTimeout(stopWatching,1500);
 }
 // Read-only: the list and the search bar's controls, not the label pinned in the bar.
 function mirrorLock(on){for(const el of [$('library'),...$('picker-tools').children])if(el!==$('activity'))el.inert=on;}
@@ -329,12 +354,6 @@ function unmirror(){
   mirrorShown=false;pickerCard.classList.remove('mirrored');mirrorLock(false);$('ghost').hidden=true;
   for(const card of $('library').querySelectorAll('.watched,.chosen'))card.classList.remove('watched','chosen');
   if(mirrorOwn){$('game-search').value=mirrorOwn.q;consoleFilter=mirrorOwn.c;filterLibrary();pickerCard.scrollTop=mirrorOwn.y;mirrorOwn=null;}
-}
-function startWatching(){watching=true;if(roomState?.host.game&&!pickerOpen){pickerOpen=watchOpened=true;library=null;renderGame();}drawMirror();renderActivity();}
-function stopWatching(){
-  clearTimeout(watchClose);watchClose=null;watching=false;
-  if(watchOpened){watchOpened=false;pickerOpen=false;renderGame();}
-  drawMirror();renderActivity();
 }
 function activityArtwork(span,game){
   const key=game.cover?game.id+':'+game.cover:'';
@@ -354,10 +373,12 @@ function renderActivity(){
   if(mirrorShown){if($('picker-tools').firstElementChild!==box)$('picker-tools').prepend(box);}
   else if(!$('game-picker').hidden){if(box.previousElementSibling!==$('picker-note'))$('picker-note').after(box);}
   else if(!phone.matches){if(aside.firstElementChild!==box)aside.prepend(box);}
-  else if(box.previousElementSibling!==document.querySelector('.screen-bar'))document.querySelector('.screen-bar').after(box);
-  const change=token?roomState?.change:null,others=token?(roomState?.choosing||[]).filter(c=>!c.yours):[];
-  const live=token&&mirrorIn?.s&&!mirrorIn.s.sel?mirrorIn.name:null,names=[...new Set([...(live?[live]:[]),...others.map(c=>c.name)])];
-  const drawn=JSON.stringify([change,names,Boolean(roomState?.host.loading),Boolean(live),mirrorShown,watching]);if(drawn===activityDrawn)return;activityDrawn=drawn;
+  else{const pad=$('touch-pad'),home=pad.parentElement!==$('screen')&&getComputedStyle(pad).display!=='none'?pad:document.querySelector('.screen-bar');
+    if(box.previousElementSibling!==home)home.after(box);}  // a phone: under the stream, and under its touch controls
+  const change=token?roomState?.change:null,others=token?(roomState?.choosing||[]).filter(c=>!c.yours):[],mode=mirrorMode();
+  const live=mode&&!mirrorIn.s.sel?mirrorIn.name:null,names=[...new Set([...(live?[live]:[]),...others.map(c=>c.name)])];
+  const s=mode==='compact'?mirrorIn.s:null,looking=s?mirrorTitle(s.h):null;
+  const drawn=JSON.stringify([change,names,Boolean(roomState?.host.loading),mode,s&&[s.q,s.c,looking]]);if(drawn===activityDrawn)return;activityDrawn=drawn;
   const rows=[];
   if(change){
     const row=document.createElement('div'),art=document.createElement('span'),text=document.createElement('span'),eyebrow=document.createElement('small'),title=document.createElement('strong'),by=document.createElement('span');
@@ -368,11 +389,18 @@ function renderActivity(){
     if(change.kind==='starting')activityArtwork(art,change.game);else art.remove();
   }
   if(names.length){
-    const row=document.createElement('div'),dot=document.createElement('i'),text=document.createElement('span');row.className='activity-choosing';
+    const row=document.createElement('div'),dot=document.createElement('i'),text=document.createElement('span');row.className='activity-choosing'+(s?' compact':'');
     const list=names.length>2?names.slice(0,-1).join(', ')+' and '+names.at(-1):names.join(' and ');
-    text.textContent=list+(names.length>1?' are':' is')+' choosing a game…'+(mirrorShown?' · watching live':'');row.append(dot,text);
-    if(live&&(watching||!mirrorShown)){const b=document.createElement('button');b.type='button';b.textContent=watching?'Stop watching':'Watch';
-      b.addEventListener('click',watching?stopWatching:startWatching);row.append(b);}
+    const head=document.createElement('span');head.textContent=list+(names.length>1?' are':' is')+' choosing a game…'+(mode==='full'?' · watching live':'');text.append(head);
+    if(s){  // what the chooser's list shows, in a line or two
+      const what=[s.q?'Searching “'+s.q+'”':'',s.c!=='all'?'Showing '+s.c.toUpperCase():''].filter(Boolean).join(' · ');
+      if(what){const line=document.createElement('small');line.textContent=what;text.append(line);}
+      if(looking){const line=document.createElement('small'),b=document.createElement('b');b.textContent=looking.title;line.append('Looking at ',b,' · '+looking.console);text.append(line);}
+    }
+    text.className='activity-text';row.append(dot,text);
+    if(live){const b=document.createElement('button');b.type='button';b.textContent=mode==='min'?'Show':'Hide';
+      b.setAttribute('aria-label',(mode==='min'?'Show':'Hide')+' what '+live+' is choosing');
+      b.addEventListener('click',mode==='min'?showMirror:hideMirror);row.append(b);}
     rows.push(row);
   }
   box.replaceChildren(...rows);box.hidden=!rows.length;
@@ -436,7 +464,7 @@ async function refresh(){
 }
 async function leaveRoom(notify=true){
   clearInput();const old=token;token=null;mine=-1;roomState=null;forgetCovers();library=null;pickerDrawn='';
-  pickerSent={open:false,at:0};pickerTouched=0;mirrorOut.on=false;mirrorIn=null;watching=watchOpened=false;unmirror();renderActivity();
+  pickerSent={open:false,at:0};pickerTouched=0;mirrorOut.on=false;mirrorIn=null;mirrorHidden=null;unmirror();renderActivity();
   if(old)try{await fetch('api/leave',{method:'POST',headers:{Authorization:'Bearer '+old,'Content-Type':'application/json'},body:'{}'});}catch{}
   const oldPC=pc;pc=null;channel=null;if(oldPC)oldPC.close();
   const oldSocket=socket;socket=null;fallbackReady=false;if(oldSocket)oldSocket.close();
@@ -539,7 +567,7 @@ $('join-form').addEventListener('submit',async event=>{
 $('leave').addEventListener('click',()=>leaveRoom());
 $('change-game').addEventListener('click',()=>{clearInput();pickerOpen=true;library=null;renderGame();renderActivity();reportPicker();});
 $('boot-screen').addEventListener('change',()=>{bootChosen=true;});
-$('close-picker').addEventListener('click',()=>{if(watching){watchOpened=false;stopWatching();}pickerOpen=false;pickerTouched=0;renderGame();renderActivity();reportPicker();});
+$('close-picker').addEventListener('click',()=>{pickerOpen=false;pickerTouched=0;renderGame();renderActivity();reportPicker();});
 $('stop-game').addEventListener('click',async()=>{if(!confirm('Stop '+roomState.host.game.title+' for everyone? Its memory card is saved.'))return;try{clearInput();await api('game/stop',{});pickerOpen=false;pickerTouched=0;}catch(e){message(e.message);}await refresh();});
 $('admin').addEventListener('submit',async event=>{event.preventDefault();try{await api('admin',{pin:$('admin-pin').value});$('admin-pin').value='';await refresh();}catch(e){message(e.message);}});
 $('spectate').addEventListener('click',async()=>{try{clearInput();await api('release',{});await refresh();message('You are watching. Choose an open slot to play.');}catch(e){message(e.message);}});

@@ -533,16 +533,27 @@ stream that never covers it:
 - **Choosing.** "Ann is choosing a game…" while a player who may choose has
   the list open over a running game, or is using it while no game runs. The
   name is the one the room already shows.
-- **Watching.** Other players can watch the chooser's list live, read-only, in
-  their own games list: the search text and the list filtering as it is typed,
-  the console filter, the scroll, the game under the chooser's pointer or
-  keyboard focus, and the pick. A labelled pointer follows the chooser's mouse;
-  it hides when the pointer leaves the list or stops for a few seconds, and a
-  touch screen sends none. On a different layout (a phone watching a desktop)
-  it follows the chooser by game card rather than by position. With reduced
-  motion the pointer jumps instead of gliding. While no game runs, players who
-  cannot choose see this by themselves; over a running game it starts only
-  when they press "Watch", and goes back to the game after the pick.
+- **Watching.** Other players follow the chooser's list live and read-only,
+  with no click: it opens by itself when the chooser opens or starts using the
+  list, opens straight away for a player who joins meanwhile, and closes when
+  the chooser closes it, picks a game (then "Starting" takes over) or
+  disconnects.
+  - While no game runs, it takes over the player's own games list: the search
+    text and the list filtering as it is typed, the console filter, the
+    scroll, the game under the chooser's pointer or keyboard focus, and the
+    pick. A labelled pointer follows the chooser's mouse; it hides when the
+    pointer leaves the list or stops for a few seconds, and a touch screen
+    sends none. On a different layout (a phone watching a desktop) it follows
+    the chooser by game card rather than by position. With reduced motion the
+    pointer jumps instead of gliding.
+  - Over a running game, it is a small panel in the strip instead: the search,
+    the console filter and the game the chooser is looking at. The game keeps
+    the keyboard, gamepad and touch controls, and on a phone the panel sits
+    below the touch controls.
+  - It never takes focus. A player typing in a field (the PIN, say) or using
+    their own list gets the small panel rather than the takeover.
+  - "Hide" folds it to one line for this choosing session; "Show" opens it
+    again. The next time someone opens the list, it opens again.
 - **Starting.** The game's clean title and cover, and who chose it, from the
   pick until the console's boot screen has played. Then it clears.
 - **Stopped.** Who stopped which game, for a few seconds.
@@ -558,7 +569,9 @@ are sent: the search box's text, never key presses, and never the host PIN or
 any other field. The host passes on only a player who may choose, one at a
 time (a second open list is not shown), drops anything else in the message,
 limits how often it may change, and ends it when the list closes, the chooser
-leaves, or it goes quiet for 5 seconds.
+leaves or their connection drops, or it goes quiet for 5 seconds (a list that
+goes quiet is no longer shown as choosing either). An update that arrives after
+the pick is ignored, so the pick stays picked out until "Starting" shows.
 
 ### Now playing
 
