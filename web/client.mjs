@@ -225,12 +225,71 @@ function pollPicker(){
 async function pick(game,item){
   const host=roomState?.host;if(host?.game&&!confirm('Switch to '+game.title+'? '+host.game.title+' stops for everyone and its memory card is saved.'))return;
   picking=true;renderLibrary();clearInput();
-  try{await api('game',{id:game.id,bootScreen:item.bootScreen&&$('boot-screen').checked});pickerOpen=false;message('Now playing '+game.title+'.');}catch(e){message(e.message);}finally{picking=false;await refresh();}
+  try{await api('game',{id:game.id,bootScreen:item.bootScreen&&$('boot-screen').checked});pickerOpen=false;pickerTouched=0;message('Now playing '+game.title+'.');}catch(e){message(e.message);}finally{picking=false;await refresh();}
 }
 function renderGame(){
   const game=roomState?.host.game,show=Boolean(token&&roomState&&(!game||pickerOpen));
   $('change-game').hidden=!token||!game||!roomState?.canPick&&!roomState?.adminPin;$('game-picker').hidden=!show;$('screen').classList.toggle('picking',show);
   if(show)void loadLibrary();
+}
+// Room activity: who has the picker open, and the game starting or just stopped, for everyone in the room.
+// The chooser's page reports its picker; the host checks the right, rate-limits it and forgets a silent one.
+const touchFirst=matchMedia('(pointer:coarse)'),desktopView=()=>!phone.matches&&!touchFirst.matches;
+let pickerSent={open:false,focus:null,at:0},pickerFocus=null,focusTimer=null,pickerTouched=0,activityArt={key:'',url:null};
+// With no game running the picker shows for everyone, so only a player using it counts as choosing:
+// one who opened it over a running game, or who has touched it in the last 20 seconds.
+for(const type of ['pointerdown','keydown','input','focusin','mouseover'])$('game-picker').addEventListener(type,()=>{pickerTouched=performance.now();},{passive:true});
+function reportPicker(){
+  const using=pickerOpen||performance.now()-pickerTouched<20000;
+  const open=Boolean(token&&roomState?.canPick&&!roomState.host.loading&&!picking&&using&&!$('game-picker').hidden&&document.visibilityState==='visible');
+  // The game under the pointer or focus, on a desktop only: a phone sends no hover and a viewer on one gets no highlight.
+  const focus=open&&desktopView()?pickerFocus:null,at=performance.now();
+  if(!open&&!pickerSent.open)return;
+  if(open===pickerSent.open&&focus===pickerSent.focus&&(!open||at-pickerSent.at<5000))return;
+  pickerSent={open,focus,at};api('picker',{open,focus}).catch(()=>{});
+}
+function pointAt(id){if(id===pickerFocus)return;pickerFocus=id;if(!focusTimer)focusTimer=setTimeout(()=>{focusTimer=null;reportPicker();},500);}
+$('library').addEventListener('focusin',e=>pointAt(e.target.closest('.game')?.dataset.id||null));
+$('library').addEventListener('mouseover',e=>{const id=e.target.closest('.game')?.dataset.id;if(id)pointAt(id);});
+$('library').addEventListener('mouseleave',()=>pointAt(null));
+document.addEventListener('visibilitychange',reportPicker);
+function activityArtwork(span,game){
+  const key=game.cover?game.id+':'+game.cover:'';
+  const mark=()=>{const b=document.createElement('b');b.textContent=(game.console||'').toUpperCase();span.className='activity-art placeholder';span.replaceChildren(b);};
+  if(key&&key===activityArt.key&&activityArt.url){const img=new Image();img.alt='';img.src=activityArt.url;span.className='activity-art';span.replaceChildren(img);return;}
+  mark();if(!key)return;
+  fetch('api/cover?id='+encodeURIComponent(game.id),{headers:{Authorization:'Bearer '+token}}).then(async r=>{if(!r.ok)return;
+    const url=URL.createObjectURL(await r.blob());if(activityArt.url)URL.revokeObjectURL(activityArt.url);activityArt={key,url};
+    if(span.isConnected){const img=new Image();img.alt='';img.src=url;span.className='activity-art';span.replaceChildren(img);}}).catch(()=>{});
+}
+let activityDrawn='';
+function renderActivity(){
+  // Always in view and never over the stream: at the top of the games list while that shows, else at the top
+  // of the side column on a wide screen, else under the stream.
+  const box=$('activity'),aside=$('now-playing').parentElement;
+  if(!$('game-picker').hidden){if(box.previousElementSibling!==$('picker-note'))$('picker-note').after(box);}
+  else if(!phone.matches){if(aside.firstElementChild!==box)aside.prepend(box);}
+  else if(box.previousElementSibling!==document.querySelector('.screen-bar'))document.querySelector('.screen-bar').after(box);
+  const change=token?roomState?.change:null,others=token?(roomState?.choosing||[]).filter(c=>!c.yours):[];
+  const desktop=desktopView(),watched=desktop?others.map(c=>c.focus?.id).filter(Boolean):[];
+  for(const card of $('library').querySelectorAll('.game'))card.classList.toggle('watched',watched.includes(card.dataset.id));
+  const drawn=JSON.stringify([change,others,desktop,Boolean(roomState?.host.loading)]);if(drawn===activityDrawn)return;activityDrawn=drawn;
+  const rows=[];
+  if(change){
+    const row=document.createElement('div'),art=document.createElement('span'),text=document.createElement('span'),eyebrow=document.createElement('small'),title=document.createElement('strong'),by=document.createElement('span');
+    row.className='activity-change '+change.kind;text.className='activity-text';
+    eyebrow.textContent=change.kind==='starting'?'STARTING':'STOPPED';title.textContent=change.game.title;
+    by.textContent=change.kind==='starting'?(roomState.host.loading?'Loading the game':'The console is starting up')+' · chosen by '+change.by:'Stopped by '+change.by+'. Its memory card is saved.';
+    text.append(eyebrow,title,by);row.append(art,text);rows.push(row);
+    if(change.kind==='starting')activityArtwork(art,change.game);else art.remove();
+  }
+  if(others.length){
+    const row=document.createElement('div'),dot=document.createElement('i'),text=document.createElement('span');row.className='activity-choosing';
+    const names=others.map(c=>c.name),list=names.length>2?names.slice(0,-1).join(', ')+' and '+names.at(-1):names.join(' and ');
+    const looking=desktop?others.find(c=>c.focus)?.focus?.title:null;
+    text.textContent=list+(names.length>1?' are':' is')+' choosing a game…'+(looking?' · looking at '+looking:'');row.append(dot,text);rows.push(row);
+  }
+  box.replaceChildren(...rows);box.hidden=!rows.length;
 }
 // Now playing: the running game's cover, title, console, time and players, plus any details it has.
 // Everything is drawn with textContent; the host checks the admin right and the lengths again.
@@ -286,11 +345,12 @@ $('np-form').addEventListener('submit',async event=>{
 });
 async function refresh(){
   if(!token||polling)return;polling=true;
-  try{roomState=await api('state');renderSlots();renderGame();renderNowPlaying();const hz=roomState.host.emulationHz;$('host-info').textContent=!roomState.host.game?'No game loaded':roomState.host.core+' · '+(Number.isFinite(hz)?Math.round(hz)+'/':'')+roomState.host.fps+' Hz game'+(roomState.host.multitap==='none'?'':' · '+roomState.host.multitap+' multitap');if(roomState.host.console){$('pad-label').textContent='KEYBOARD → '+roomState.host.pad.toUpperCase();setAnalog(!!roomState.host.analog);$('game-label').textContent='ORIGINAL '+roomState.host.console+' GAME · BROWSER STREAMING';}if(roomState.host.error&&roomState.host.game)message('The emulator stopped: '+roomState.host.error);renderDiagnostics();}
+  try{roomState=await api('state');renderSlots();renderGame();renderNowPlaying();renderActivity();reportPicker();const hz=roomState.host.emulationHz;$('host-info').textContent=!roomState.host.game?'No game loaded':roomState.host.core+' · '+(Number.isFinite(hz)?Math.round(hz)+'/':'')+roomState.host.fps+' Hz game'+(roomState.host.multitap==='none'?'':' · '+roomState.host.multitap+' multitap');if(roomState.host.console){$('pad-label').textContent='KEYBOARD → '+roomState.host.pad.toUpperCase();setAnalog(!!roomState.host.analog);$('game-label').textContent='ORIGINAL '+roomState.host.console+' GAME · BROWSER STREAMING';}if(roomState.host.error&&roomState.host.game)message('The emulator stopped: '+roomState.host.error);renderDiagnostics();}
   catch(e){message(e.message);}finally{polling=false;}
 }
 async function leaveRoom(notify=true){
   clearInput();const old=token;token=null;mine=-1;roomState=null;forgetCovers();library=null;pickerDrawn='';
+  pickerSent={open:false,focus:null,at:0};pickerFocus=null;pickerTouched=0;renderActivity();
   if(old)try{await fetch('api/leave',{method:'POST',headers:{Authorization:'Bearer '+old,'Content-Type':'application/json'},body:'{}'});}catch{}
   const oldPC=pc;pc=null;channel=null;if(oldPC)oldPC.close();
   const oldSocket=socket;socket=null;fallbackReady=false;if(oldSocket)oldSocket.close();
@@ -391,10 +451,10 @@ $('join-form').addEventListener('submit',async event=>{
   }catch(error){await leaveRoom(false);message(error.message);}finally{joining=false;}
 });
 $('leave').addEventListener('click',()=>leaveRoom());
-$('change-game').addEventListener('click',()=>{clearInput();pickerOpen=true;library=null;renderGame();});
+$('change-game').addEventListener('click',()=>{clearInput();pickerOpen=true;library=null;renderGame();renderActivity();reportPicker();});
 $('boot-screen').addEventListener('change',()=>{bootChosen=true;});
-$('close-picker').addEventListener('click',()=>{pickerOpen=false;renderGame();});
-$('stop-game').addEventListener('click',async()=>{if(!confirm('Stop '+roomState.host.game.title+' for everyone? Its memory card is saved.'))return;try{clearInput();await api('game/stop',{});pickerOpen=false;}catch(e){message(e.message);}await refresh();});
+$('close-picker').addEventListener('click',()=>{pickerOpen=false;pickerTouched=0;renderGame();renderActivity();reportPicker();});
+$('stop-game').addEventListener('click',async()=>{if(!confirm('Stop '+roomState.host.game.title+' for everyone? Its memory card is saved.'))return;try{clearInput();await api('game/stop',{});pickerOpen=false;pickerTouched=0;}catch(e){message(e.message);}await refresh();});
 $('admin').addEventListener('submit',async event=>{event.preventDefault();try{await api('admin',{pin:$('admin-pin').value});$('admin-pin').value='';await refresh();}catch(e){message(e.message);}});
 $('spectate').addEventListener('click',async()=>{try{clearInput();await api('release',{});await refresh();message('You are watching. Choose an open slot to play.');}catch(e){message(e.message);}});
 $('sound').addEventListener('click',async()=>{muted=!muted;rtcAudio.muted=muted;try{

@@ -93,3 +93,24 @@ body[data-player="2"]{--me:var(--p2)}body[data-player="3"]{--me:var(--p3)}body[d
 .np-save{background:var(--green);color:#172315;border-color:var(--green)}
 @media(max-width:700px){.now-playing{margin:4px 0 20px}.np-art{height:150px}.np-art.placeholder{height:90px}}
 .np-save:hover:enabled{background:#d0ff94;color:#172315}
+
+/* Room activity: who is choosing, and the game starting or just stopped. Below the stream, never over it. */
+.activity{display:flex;flex-direction:column;gap:6px;margin:10px 0 0}
+.activity>div{display:flex;align-items:center;gap:12px;border:1px solid var(--border);background:var(--panel);border-radius:4px;padding:9px 12px;font-size:12px;line-height:1.4}
+.activity-choosing i{width:7px;height:7px;border-radius:50%;background:var(--green);flex:none;animation:activity-pulse 1.4s ease-in-out infinite}
+@keyframes activity-pulse{50%{opacity:.25}}
+@media(prefers-reduced-motion:reduce){.activity-choosing i{animation:none}}
+.activity-change.starting{border-left:3px solid var(--green)}
+.activity-change.stopped{color:var(--muted)}
+.activity-art{flex:none;width:40px;height:56px;border-radius:2px;overflow:hidden;background:#06090b;display:flex;align-items:center;justify-content:center}
+.activity-art img{width:100%;height:100%;object-fit:cover}
+.activity-art.placeholder{background:linear-gradient(160deg,#1a3441,#0b1419 70%)}
+.activity-art.placeholder b{font-family:var(--pixel);font-size:10px;color:var(--green);letter-spacing:1px}
+.activity-text{display:flex;flex-direction:column;min-width:0}
+.activity-text small{font-family:var(--pixel);font-size:9px;letter-spacing:1px;color:var(--green)}
+.activity-change.stopped .activity-text small{color:var(--muted)}
+.activity-text strong{font-size:14px;overflow-wrap:anywhere}
+.activity-text span{color:var(--muted);font-size:11px}
+.game.watched{outline:2px dashed var(--p2);outline-offset:2px}
+.picker-card .activity{margin:0 0 14px}
+aside>.activity{margin:0 0 14px}

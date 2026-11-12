@@ -47,11 +47,16 @@ class Launcher:
         """One folder per game: its memory cards and saves stay apart from every other game's."""
         return Path(self.saves)/game.console/f'{game.title} [{game.id[:8]}]'
 
+    def boot_options(self, game, boot_screen=None):
+        """The options that play the console's boot screen before this game, or ()."""
+        wanted = self.boot_screen if boot_screen is None else boot_screen
+        return PROFILES[game.profile].boot_screen(self.system) if wanted else ()
+
     def emulator(self, game, hub, boot_screen=None):
         """Build (not start) the game's emulator. Resize the hub first: the emulator reads its slot count."""
         core, players, multitap = self.plan(game)
         profile = PROFILES[game.profile]
-        boot = profile.boot_screen(self.system) if (self.boot_screen if boot_screen is None else boot_screen) else ()
+        boot = self.boot_options(game, boot_screen)
         # --core-option comes last, so the host can still override any of these.
         return Emulator(core, game.path, self.system, self.save_folder(game), hub, multitap, None,
                         profile, (*profile.library_options, *boot, *self.options))

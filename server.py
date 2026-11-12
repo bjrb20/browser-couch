@@ -34,6 +34,11 @@ from systems import PROFILES
 import tracer
 
 ROOT = Path(__file__).resolve().parent
+CHOOSING_FOR = 15  # seconds an open picker counts without news from it; the page reports every 5
+# Roughly how long each console's boot screen plays before the game's own first screen.
+BOOT_SECONDS = dict(ps1=12, ps2=16)
+STARTED_FOR = 3  # seconds "Starting" stays after the game is up, when there is no boot screen to wait for
+STOPPED_FOR = 6  # seconds everyone sees that a game was stopped
 log = logging.getLogger('stream')
 
 
@@ -112,6 +117,8 @@ class Room:
         self.jpeg_at = 0
         self.jpeg_data = b''
         self.sockets = set()
+        self.choosers = {}  # token -> {until, focus}: players with the game picker open
+        self.change = None  # {kind: starting or stopped, game, by, until}: what everyone sees as games change
 
     def authenticate(self, request):
         header = request.headers.get('Authorization', '')
@@ -166,7 +173,54 @@ class Room:
                                       inputPollMs=self.hub.timing(token),
                                       sourceFrameAgeMs=max(0, (time.monotonic()-captured)*1000) if captured else None,
                                       viewers=len(self.clients), canPick=self.can_pick(client),
-                                      adminPin=bool(self.admin_pin) and bool(self.library)))
+                                      adminPin=bool(self.admin_pin) and bool(self.library),
+                                      choosing=self.choosing(token), change=self.changing()))
+
+    def choosing(self, token):
+        """Who has the game picker open, by the names the room already shows, and the game they are on."""
+        now, shown = time.monotonic(), []
+        for owner, entry in list(self.choosers.items()):
+            client = self.clients.get(owner)
+            if not client or entry['until'] < now or not self.can_pick(client):
+                del self.choosers[owner]
+                continue
+            game = self.library.games.get(entry['focus']) if self.library and entry['focus'] else None
+            shown.append(dict(name=client['name'], yours=owner == token,
+                              focus=dict(id=game.id, title=game.name) if game else None))
+        return shown
+
+    def changing(self):
+        """The game that is starting, or the one that just stopped, until its moment has passed."""
+        if self.change and self.change['until'] is not None and self.change['until'] < time.monotonic():
+            self.change = None
+        return {key: value for key, value in self.change.items() if key != 'until'} if self.change else None
+
+    async def choose(self, request):
+        """The picker opened, moved to a game, or closed: {open, focus: game id or null}.
+
+        Only a player who may choose games can say they are choosing. An open picker that stops
+        reporting is forgotten after CHOOSING_FOR seconds, so it never sticks.
+        """
+        token, client = self.authenticate(request)
+        calls = client.setdefault('picker_calls', deque())
+        now = time.monotonic()
+        while calls and calls[0] < now-10:
+            calls.popleft()
+        if len(calls) >= 30:
+            raise web.HTTPTooManyRequests(text='Too many picker updates. Wait a moment.')
+        calls.append(now)
+        body = await request.json()
+        if not isinstance(body, dict) or not isinstance(body.get('open'), bool):
+            raise web.HTTPBadRequest(text='Invalid picker update')
+        if not body['open']:
+            self.choosers.pop(token, None)
+            return web.json_response(dict(ok=True))
+        if not self.can_pick(client):
+            raise web.HTTPForbidden(text='Enter the PIN to choose games')
+        focus = body.get('focus')
+        focus = focus if isinstance(focus, str) and self.library and focus in self.library.games else None
+        self.choosers[token] = dict(until=now+CHOOSING_FOR, focus=focus)
+        return web.json_response(dict(ok=True))
 
     async def games(self, request):
         """The game library: console names, titles and ids only."""
@@ -374,24 +428,41 @@ class Room:
         game = self.library.games.get(body.get('id')) if isinstance(body, dict) else None
         if not game:
             raise web.HTTPNotFound(text='That game is no longer in the library')
+        token, client = self.authenticate(request)
         async with self.session.lock:
+            self.choosers.pop(token, None)
+            cover = await asyncio.to_thread(self.covers.info, game) if self.covers else None
+            self.change = dict(kind='starting', by=client['name'], until=None,
+                               game=dict(id=game.id, title=game.name, console=game.console,
+                                         cover=cover['version'] if cover else None))
             await self.session.unload()
             _, players, _ = self.launcher.plan(game)
             self.hub.resize(players)
             try:
                 boot = body.get('bootScreen')
-                emulator = self.launcher.emulator(game, self.hub, boot if isinstance(boot, bool) else None)
+                boot = boot if isinstance(boot, bool) else None
+                emulator = self.launcher.emulator(game, self.hub, boot)
                 await self.session.load(emulator, game.name, game.id)
             except RuntimeError as error:
                 print(error, flush=True)
+                self.change = None
                 raise web.HTTPInternalServerError(text=str(error)) from error
+            # Everyone keeps seeing "Starting" while the console's boot screen plays.
+            booting = BOOT_SECONDS.get(game.console, 12) if self.launcher.boot_options(game, boot) else 0
+            self.change['until'] = time.monotonic()+booting+STARTED_FOR
         return web.json_response(dict(ok=True))
 
     async def unpick(self, request):
         """Stop the game and go back to the picker. The memory card is saved as the game stops."""
         self.picker(request)
+        token, client = self.authenticate(request)
         async with self.session.lock:
+            title, game_id = self.session.title, self.session.game_id
             await self.session.unload()
+            game = self.library.games.get(game_id) if game_id else None
+            self.change = dict(kind='stopped', by=client['name'], until=time.monotonic()+STOPPED_FOR,
+                               game=dict(id=game.id, title=game.name, console=game.console, cover=None)
+                               if game else dict(id=None, title=title, console=None, cover=None)) if title else None
         return web.json_response(dict(ok=True))
 
     async def claim(self, request):
@@ -422,6 +493,7 @@ class Room:
 
     async def remove(self, token):
         client = self.clients.pop(token, None)
+        self.choosers.pop(token, None)
         self.hub.forget(token)
         if client:
             await self.close_peer(client)
@@ -678,7 +750,8 @@ def make_app(room, trusted_proxies=()):
                            ('release', room.release), ('leave', room.leave), ('admin', room.admin),
                            ('game', room.pick), ('game/stop', room.unpick), ('cover', room.cover_upload),
                            ('cover/remove', room.cover_remove), ('cover/fetch', room.cover_fetch),
-                           ('game/about', room.about_edit), ('game/match', room.match)]:
+                           ('game/about', room.about_edit), ('game/match', room.match),
+                           ('picker', room.choose)]:
         app.router.add_post('/api/' + route, handler)
     app.router.add_get('/api/state', room.state)
     app.router.add_get('/api/library', room.games)

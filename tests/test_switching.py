@@ -2,6 +2,7 @@ import asyncio
 from pathlib import Path
 import tempfile
 import threading
+import time
 from unittest import IsolatedAsyncioTestCase, TestCase
 
 from aiohttp.test_utils import TestClient, TestServer
@@ -11,7 +12,7 @@ from fetch_core import core_filename
 from inputs import InputHub
 from library import Game, Library
 from media import GameAudio
-from server import Room, make_app
+from server import STARTED_FOR, Room, make_app
 from session import Launcher, Session
 
 from test_library import Host
@@ -192,6 +193,100 @@ class SwitchTests(IsolatedAsyncioTestCase):
         for _ in range(12):
             await client.post('/api/admin', json=dict(pin='0000'), headers=auth)
         self.assertEqual((await client.post('/api/admin', json=dict(pin='4321'), headers=auth)).status, 429)
+
+
+class ActivityTests(IsolatedAsyncioTestCase):
+    """Who is choosing, and the game starting or just stopped, as every player in the room sees it."""
+    asyncSetUp, room, join = SwitchTests.asyncSetUp, SwitchTests.room, SwitchTests.join
+
+    async def state(self, client, auth):
+        return await (await client.get('/api/state', headers=auth)).json()
+
+    async def test_only_a_player_who_may_choose_shows_as_choosing(self):
+        room, client = await self.room(admin_pin='4321')
+        _, ann = await self.join(client)
+        _, bob = await self.join(client, 'Bob')
+        self.assertEqual((await client.post('/api/picker', json=dict(open=True), headers=bob)).status, 403)
+        self.assertEqual((await client.post('/api/picker', json=dict(open=True))).status, 401)
+        self.assertEqual((await client.post('/api/picker', json=dict(open='yes'), headers=ann)).status, 400)
+        await client.post('/api/admin', json=dict(pin='4321'), headers=ann)
+        response = await client.post('/api/picker', json=dict(open=True, focus=self.ids['Demo']), headers=ann)
+        self.assertEqual(response.status, 200)
+        self.assertEqual((await self.state(client, bob))['choosing'],
+                         [dict(name='Ann', yours=False, focus=dict(id=self.ids['Demo'], title='Demo'))])
+        self.assertTrue((await self.state(client, ann))['choosing'][0]['yours'])
+        # A focus that is not a library game is dropped, and no path or file name is ever sent.
+        await client.post('/api/picker', json=dict(open=True, focus='../ps2/Demo.elf'), headers=ann)
+        state = await self.state(client, bob)
+        self.assertIsNone(state['choosing'][0]['focus'])
+        self.assertNotIn('.elf', str(state))
+        self.assertNotIn('.cue', str(state))
+
+    async def test_choosing_clears_on_close_leave_timeout_and_lost_right(self):
+        room, client = await self.room()
+        ann_token, ann = await self.join(client)
+        _, bob = await self.join(client, 'Bob')
+        await client.post('/api/picker', json=dict(open=True), headers=ann)
+        await client.post('/api/picker', json=dict(open=False), headers=ann)
+        self.assertEqual((await self.state(client, bob))['choosing'], [])
+
+        await client.post('/api/picker', json=dict(open=True), headers=ann)
+        room.choosers[ann_token]['until'] = 0  # its page stopped reporting
+        self.assertEqual((await self.state(client, bob))['choosing'], [])
+
+        await client.post('/api/picker', json=dict(open=True), headers=ann)
+        room.library = None  # nobody may choose any more
+        self.assertEqual((await self.state(client, bob))['choosing'], [])
+        room.library = self.library
+
+        await client.post('/api/picker', json=dict(open=True), headers=ann)
+        await client.post('/api/leave', json={}, headers=ann)
+        self.assertEqual((await self.state(client, bob))['choosing'], [])
+        self.assertEqual(room.choosers, {})
+
+    async def test_picker_updates_are_rate_limited(self):
+        room, client = await self.room()
+        _, ann = await self.join(client)
+        for _ in range(30):
+            await client.post('/api/picker', json=dict(open=True), headers=ann)
+        self.assertEqual((await client.post('/api/picker', json=dict(open=False), headers=ann)).status, 429)
+
+    async def test_everyone_sees_the_game_starting_with_its_chooser_then_it_clears(self):
+        gate = threading.Event()
+        room, client = await self.room(**{'Canyon Racer': dict(gate=gate)})
+        _, ann = await self.join(client)
+        _, bob = await self.join(client, 'Bob')
+        await client.post('/api/picker', json=dict(open=True), headers=ann)
+        first = asyncio.create_task(client.post('/api/game', json=dict(id=self.ids['Canyon Racer']), headers=ann))
+        while not self.log:
+            await asyncio.sleep(.01)
+        state = await self.state(client, bob)
+        starting = dict(kind='starting', by='Ann',
+                        game=dict(id=self.ids['Canyon Racer'], title='Canyon Racer', console='ps1', cover=None))
+        self.assertEqual(state['change'], starting)
+        self.assertEqual(state['choosing'], [], 'picking ends the choosing')
+        gate.set()
+        self.assertEqual((await first).status, 200)
+        self.assertEqual((await self.state(client, bob))['change'], starting, 'it stays while the console boots')
+        room.change['until'] = 0
+        self.assertIsNone((await self.state(client, bob))['change'])
+
+    async def test_a_stop_says_who_stopped_and_a_failed_start_shows_nothing(self):
+        room, client = await self.room(**{'Demo': dict(fail=True)})
+        _, ann = await self.join(client)
+        _, bob = await self.join(client, 'Bob')
+        await client.post('/api/game', json=dict(id=self.ids['Canyon Racer']), headers=ann)
+        await client.post('/api/game/stop', headers=bob)
+        self.assertEqual((await self.state(client, ann))['change'], dict(
+            kind='stopped', by='Bob', game=dict(id=self.ids['Canyon Racer'], title='Canyon Racer', console='ps1', cover=None)))
+        self.assertEqual((await client.post('/api/game', json=dict(id=self.ids['Demo']), headers=ann)).status, 500)
+        self.assertIsNone((await self.state(client, ann))['change'])
+
+    async def test_a_game_without_a_boot_screen_clears_soon_after_it_starts(self):
+        room, client = await self.room()
+        _, ann = await self.join(client)
+        await client.post('/api/game', json=dict(id=self.ids['Demo'], bootScreen=False), headers=ann)
+        self.assertLessEqual(room.change['until']-time.monotonic(), STARTED_FOR)
 
 
 class HubResizeTests(TestCase):

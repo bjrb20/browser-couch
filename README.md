@@ -527,6 +527,23 @@ PS1 library games use four slots on the multitap, as with `--disc`. PS2 games
 use two, or four when the multitap core is built (see "PS2"). `--players` and
 `--core-option` apply to every library game.
 
+Everyone in the room sees what the chooser is doing, in a strip below the
+stream that never covers it:
+
+- **Choosing.** "Ann is choosing a game…" while a player who may choose has
+  the list open over a running game, or is using it while no game runs. The
+  name is the one the room already shows. On a desktop, viewers also see the
+  game the chooser is pointing at, and its card is outlined in their list.
+  Phones neither send nor show this.
+- **Starting.** The game's clean title and cover, and who chose it, from the
+  pick until the console's boot screen has played. Then it clears.
+- **Stopped.** Who stopped which game, for a few seconds.
+
+The host keeps this state. Only a player who may choose can say they are
+choosing, updates are rate-limited, and a list that stops reporting (a closed
+tab, a lost connection) is forgotten after 15 seconds. It shows names, titles
+and covers players can already see, never a path.
+
 ### Now playing
 
 While a game runs, a "Now playing" panel shows its cover, clean title, console,
