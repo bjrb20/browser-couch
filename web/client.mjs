@@ -82,6 +82,7 @@ function filterLibrary(){
   }
   for(const chip of $('console-filter').children)chip.setAttribute('aria-pressed',String(chip.dataset.console===consoleFilter));
   const total=(library?.consoles||[]).reduce((n,c)=>n+c.games.length,0);
+  mirrorSoon();
   $('no-match').hidden=!total||shown>0;$('no-match').textContent=query?'No games match “'+$('game-search').value.trim()+'”.':'No games for this console.';
 }
 function placeholder(art,game,item){art.classList.add('placeholder');const c=document.createElement('b'),t=document.createElement('span');c.textContent=item.id.toUpperCase();t.textContent=game.title;art.replaceChildren(c,t);}
@@ -175,6 +176,7 @@ function renderLibrary(){
   filterLibrary();
   for(const item of consoles)for(const game of item.games)if(game.cover)queueCover(game);  // now the cards are in the page
   if(focusedId)list.querySelector(`.game[data-id="${focusedId}"] .pick:enabled`)?.focus();
+  if(mirrorShown||mirrorIn?.s)drawMirror();
   // While art is being fetched, look again every few seconds.
   if(!fetchPoll&&consoles.some(c=>c.games.some(g=>g.fetch?.state)))fetchPoll=setTimeout(()=>{fetchPoll=null;if(token&&library&&!$('game-picker').hidden)void loadLibrary(true);},3000);
 }
@@ -234,25 +236,106 @@ function renderGame(){
 }
 // Room activity: who has the picker open, and the game starting or just stopped, for everyone in the room.
 // The chooser's page reports its picker; the host checks the right, rate-limits it and forgets a silent one.
-const touchFirst=matchMedia('(pointer:coarse)'),desktopView=()=>!phone.matches&&!touchFirst.matches;
-let pickerSent={open:false,focus:null,at:0},pickerFocus=null,focusTimer=null,pickerTouched=0,activityArt={key:'',url:null};
+let pickerSent={open:false,at:0},pickerTouched=0,activityArt={key:'',url:null};
 // With no game running the picker shows for everyone, so only a player using it counts as choosing:
 // one who opened it over a running game, or who has touched it in the last 20 seconds.
-for(const type of ['pointerdown','keydown','input','focusin','mouseover'])$('game-picker').addEventListener(type,()=>{pickerTouched=performance.now();},{passive:true});
-function reportPicker(){
+for(const type of ['pointerdown','keydown','input','focusin','mouseover'])$('game-picker').addEventListener(type,()=>{if(!mirrorShown)pickerTouched=performance.now();},{passive:true});
+function choosingOpen(){
   const using=pickerOpen||performance.now()-pickerTouched<20000;
-  const open=Boolean(token&&roomState?.canPick&&!roomState.host.loading&&!picking&&using&&!$('game-picker').hidden&&document.visibilityState==='visible');
-  // The game under the pointer or focus, on a desktop only: a phone sends no hover and a viewer on one gets no highlight.
-  const focus=open&&desktopView()?pickerFocus:null,at=performance.now();
-  if(!open&&!pickerSent.open)return;
-  if(open===pickerSent.open&&focus===pickerSent.focus&&(!open||at-pickerSent.at<5000))return;
-  pickerSent={open,focus,at};api('picker',{open,focus}).catch(()=>{});
+  return Boolean(token&&roomState?.canPick&&!roomState.host.loading&&!picking&&!watching&&!mirrorShown&&using&&!$('game-picker').hidden&&document.visibilityState==='visible');
 }
-function pointAt(id){if(id===pickerFocus)return;pickerFocus=id;if(!focusTimer)focusTimer=setTimeout(()=>{focusTimer=null;reportPicker();},500);}
-$('library').addEventListener('focusin',e=>pointAt(e.target.closest('.game')?.dataset.id||null));
-$('library').addEventListener('mouseover',e=>{const id=e.target.closest('.game')?.dataset.id;if(id)pointAt(id);});
-$('library').addEventListener('mouseleave',()=>pointAt(null));
+function reportPicker(){
+  const open=choosingOpen(),at=performance.now();mirrorTick(open);
+  if(!open&&!pickerSent.open)return;
+  if(open===pickerSent.open&&(!open||at-pickerSent.at<5000))return;
+  pickerSent={open,at};api('picker',{open}).catch(()=>{});
+}
 document.addEventListener('visibilitychange',reportPicker);
+// Picker mirror. The chooser's page sends what its picker shows, at most 20 times a second and only when that
+// changes: the search box's text (never keys), the console filter, the scroll, the game under the pointer or
+// focus, and the pointer. Nothing else is read, so the PIN and every other field never leave the page.
+const pickerCard=document.querySelector('.picker-card'),round3=v=>Math.round(Math.min(Math.max(v,0),1)*1000)/1000;
+const mirrorOut={on:false,last:'',at:0,timer:null,p:null,o:null,over:null,pointerAt:0};
+function layoutKey(){const grid=[...$('library').querySelectorAll('.games')].find(g=>g.offsetParent);return (phone.matches?'p':'d')+(grid?Math.min(getComputedStyle(grid).gridTemplateColumns.split(' ').length,99):0);}
+function mirrorSnapshot(){
+  const room=pickerCard.scrollHeight-pickerCard.clientHeight,live=performance.now()-mirrorOut.pointerAt<3000;  // a still pointer goes after 3 s
+  const focusedCard=$('library').contains(document.activeElement)?document.activeElement.closest('.game')?.dataset.id:null;
+  return {q:$('game-search').value.slice(0,40),c:consoleFilter,y:room>0?round3(pickerCard.scrollTop/room):0,
+    h:(live&&mirrorOut.over)||focusedCard||null,p:live?mirrorOut.p:null,o:live&&mirrorOut.over?mirrorOut.o:null,l:layoutKey()};
+}
+function mirrorFlush(force=false){
+  mirrorOut.timer=null;if(!mirrorOut.on)return;
+  const s=mirrorSnapshot(),text=JSON.stringify(s);
+  if(text===mirrorOut.last&&!force)return;
+  if(send({t:'mirror',s})){mirrorOut.last=text;mirrorOut.at=performance.now();}
+}
+function mirrorSoon(){if(mirrorOut.on&&!mirrorOut.timer)mirrorOut.timer=setTimeout(mirrorFlush,Math.max(0,50-(performance.now()-mirrorOut.at)));}
+function mirrorTick(open){
+  if(open&&!mirrorOut.on){mirrorOut.on=true;mirrorOut.last='';mirrorSoon();}
+  else if(!open&&mirrorOut.on){mirrorOut.on=false;clearTimeout(mirrorOut.timer);mirrorOut.timer=null;
+    if(!picking&&!roomState?.host.loading)send({t:'mirror',s:null});}  // after a pick the host shows the choice, then ends it
+  else if(open){if(performance.now()-mirrorOut.at>2000)mirrorFlush(true);else mirrorSoon();}
+}
+pickerCard.addEventListener('pointermove',e=>{
+  if(e.pointerType==='touch'||!mirrorOut.on)return;  // no pointer to show from a touch screen
+  const c=pickerCard.getBoundingClientRect(),card=e.target.closest?.('#library .game');
+  mirrorOut.p=[round3((e.clientX-c.left)/c.width),round3((e.clientY-c.top)/c.height)];
+  if(card){const r=card.getBoundingClientRect();mirrorOut.over=card.dataset.id;mirrorOut.o=[round3((e.clientX-r.left)/r.width),round3((e.clientY-r.top)/r.height)];}
+  else mirrorOut.over=mirrorOut.o=null;
+  mirrorOut.pointerAt=performance.now();mirrorSoon();
+},{passive:true});
+pickerCard.addEventListener('pointerleave',()=>{mirrorOut.p=mirrorOut.o=mirrorOut.over=null;mirrorSoon();});
+pickerCard.addEventListener('scroll',mirrorSoon,{passive:true});
+$('library').addEventListener('focusin',mirrorSoon);$('library').addEventListener('focusout',mirrorSoon);
+$('game-search').addEventListener('input',mirrorSoon);
+// Watching: the chooser's picker, read-only, in this page's own picker. It shows by itself to a player who
+// cannot choose while no game runs; anyone else opens it with "Watch". A different layout (a phone watching
+// a desktop) follows the chooser by game card rather than by position.
+let mirrorIn=null,mirrorShown=false,mirrorOwn=null,watching=false,watchOpened=false,watchClose=null;
+function mirrorReceive(data){
+  if(!data||!Number.isInteger(data.n)||mirrorIn&&data.n<=mirrorIn.n)return;
+  const had=Boolean(mirrorIn?.s);mirrorIn={n:data.n,name:data.name,s:data.s||null};
+  if(had&&!mirrorIn.s&&watching)stopWatching();else drawMirror();
+  renderActivity();
+}
+function mirrorWanted(){return Boolean(mirrorIn?.s&&token&&roomState&&!$('game-picker').hidden&&(watching||!roomState.canPick&&!roomState.host.game));}
+function revealInPicker(el){const c=pickerCard.getBoundingClientRect(),r=el.getBoundingClientRect();
+  if(r.top<c.top+8)pickerCard.scrollTop-=c.top+8-r.top;else if(r.bottom>c.bottom-8)pickerCard.scrollTop+=r.bottom-c.bottom+8;}
+function placeGhost(s,target,same){
+  const ghost=$('ghost'),base=$('game-picker').getBoundingClientRect();let x,y;
+  if(target&&(s.o||s.sel)){const r=target.getBoundingClientRect(),o=s.o||[.5,.5];x=r.left+o[0]*r.width;y=r.top+o[1]*r.height;}
+  else if(same&&s.p){const c=pickerCard.getBoundingClientRect();x=c.left+s.p[0]*c.width;y=c.top+s.p[1]*c.height;}
+  else{ghost.hidden=true;return;}
+  ghost.lastElementChild.textContent=mirrorIn.name;ghost.hidden=false;ghost.style.transform=`translate(${Math.round(x-base.left)}px,${Math.round(y-base.top)}px)`;
+}
+function drawMirror(){
+  if(!mirrorWanted()){if(mirrorShown)unmirror();return;}
+  const s=mirrorIn.s;
+  if(!mirrorShown){mirrorShown=true;mirrorOwn={q:$('game-search').value,c:consoleFilter,y:pickerCard.scrollTop};pickerCard.classList.add('mirrored');mirrorLock(true);}
+  $('game-search').value=s.q;consoleFilter=library?.consoles.some(c=>c.id===s.c)?s.c:'all';filterLibrary();
+  let target=null;
+  for(const card of $('library').querySelectorAll('.game')){const id=card.dataset.id;
+    card.classList.toggle('watched',id===s.h&&!s.sel);card.classList.toggle('chosen',id===s.sel);if(id===(s.sel||s.h)&&!card.hidden)target=card;}
+  const same=s.l===layoutKey();
+  if(same||!target){const room=pickerCard.scrollHeight-pickerCard.clientHeight;pickerCard.scrollTop=Math.round(s.y*room);}
+  if(target&&(!same||s.sel))revealInPicker(target);
+  placeGhost(s,target,same);
+  // The choice is picked out for a moment, then a watcher who opened this over a game goes back to it.
+  if(s.sel&&watchOpened&&!watchClose)watchClose=setTimeout(stopWatching,1500);
+}
+// Read-only: the list and the search bar's controls, not the label pinned in the bar.
+function mirrorLock(on){for(const el of [$('library'),...$('picker-tools').children])if(el!==$('activity'))el.inert=on;}
+function unmirror(){
+  mirrorShown=false;pickerCard.classList.remove('mirrored');mirrorLock(false);$('ghost').hidden=true;
+  for(const card of $('library').querySelectorAll('.watched,.chosen'))card.classList.remove('watched','chosen');
+  if(mirrorOwn){$('game-search').value=mirrorOwn.q;consoleFilter=mirrorOwn.c;filterLibrary();pickerCard.scrollTop=mirrorOwn.y;mirrorOwn=null;}
+}
+function startWatching(){watching=true;if(roomState?.host.game&&!pickerOpen){pickerOpen=watchOpened=true;library=null;renderGame();}drawMirror();renderActivity();}
+function stopWatching(){
+  clearTimeout(watchClose);watchClose=null;watching=false;
+  if(watchOpened){watchOpened=false;pickerOpen=false;renderGame();}
+  drawMirror();renderActivity();
+}
 function activityArtwork(span,game){
   const key=game.cover?game.id+':'+game.cover:'';
   const mark=()=>{const b=document.createElement('b');b.textContent=(game.console||'').toUpperCase();span.className='activity-art placeholder';span.replaceChildren(b);};
@@ -267,13 +350,14 @@ function renderActivity(){
   // Always in view and never over the stream: at the top of the games list while that shows, else at the top
   // of the side column on a wide screen, else under the stream.
   const box=$('activity'),aside=$('now-playing').parentElement;
-  if(!$('game-picker').hidden){if(box.previousElementSibling!==$('picker-note'))$('picker-note').after(box);}
+  // While watching it stays pinned in the search bar, so the chooser's name scrolls with nothing.
+  if(mirrorShown){if($('picker-tools').firstElementChild!==box)$('picker-tools').prepend(box);}
+  else if(!$('game-picker').hidden){if(box.previousElementSibling!==$('picker-note'))$('picker-note').after(box);}
   else if(!phone.matches){if(aside.firstElementChild!==box)aside.prepend(box);}
   else if(box.previousElementSibling!==document.querySelector('.screen-bar'))document.querySelector('.screen-bar').after(box);
   const change=token?roomState?.change:null,others=token?(roomState?.choosing||[]).filter(c=>!c.yours):[];
-  const desktop=desktopView(),watched=desktop?others.map(c=>c.focus?.id).filter(Boolean):[];
-  for(const card of $('library').querySelectorAll('.game'))card.classList.toggle('watched',watched.includes(card.dataset.id));
-  const drawn=JSON.stringify([change,others,desktop,Boolean(roomState?.host.loading)]);if(drawn===activityDrawn)return;activityDrawn=drawn;
+  const live=token&&mirrorIn?.s&&!mirrorIn.s.sel?mirrorIn.name:null,names=[...new Set([...(live?[live]:[]),...others.map(c=>c.name)])];
+  const drawn=JSON.stringify([change,names,Boolean(roomState?.host.loading),Boolean(live),mirrorShown,watching]);if(drawn===activityDrawn)return;activityDrawn=drawn;
   const rows=[];
   if(change){
     const row=document.createElement('div'),art=document.createElement('span'),text=document.createElement('span'),eyebrow=document.createElement('small'),title=document.createElement('strong'),by=document.createElement('span');
@@ -283,11 +367,13 @@ function renderActivity(){
     text.append(eyebrow,title,by);row.append(art,text);rows.push(row);
     if(change.kind==='starting')activityArtwork(art,change.game);else art.remove();
   }
-  if(others.length){
+  if(names.length){
     const row=document.createElement('div'),dot=document.createElement('i'),text=document.createElement('span');row.className='activity-choosing';
-    const names=others.map(c=>c.name),list=names.length>2?names.slice(0,-1).join(', ')+' and '+names.at(-1):names.join(' and ');
-    const looking=desktop?others.find(c=>c.focus)?.focus?.title:null;
-    text.textContent=list+(names.length>1?' are':' is')+' choosing a game…'+(looking?' · looking at '+looking:'');row.append(dot,text);rows.push(row);
+    const list=names.length>2?names.slice(0,-1).join(', ')+' and '+names.at(-1):names.join(' and ');
+    text.textContent=list+(names.length>1?' are':' is')+' choosing a game…'+(mirrorShown?' · watching live':'');row.append(dot,text);
+    if(live&&(watching||!mirrorShown)){const b=document.createElement('button');b.type='button';b.textContent=watching?'Stop watching':'Watch';
+      b.addEventListener('click',watching?stopWatching:startWatching);row.append(b);}
+    rows.push(row);
   }
   box.replaceChildren(...rows);box.hidden=!rows.length;
 }
@@ -345,12 +431,12 @@ $('np-form').addEventListener('submit',async event=>{
 });
 async function refresh(){
   if(!token||polling)return;polling=true;
-  try{roomState=await api('state');renderSlots();renderGame();renderNowPlaying();renderActivity();reportPicker();const hz=roomState.host.emulationHz;$('host-info').textContent=!roomState.host.game?'No game loaded':roomState.host.core+' · '+(Number.isFinite(hz)?Math.round(hz)+'/':'')+roomState.host.fps+' Hz game'+(roomState.host.multitap==='none'?'':' · '+roomState.host.multitap+' multitap');if(roomState.host.console){$('pad-label').textContent='KEYBOARD → '+roomState.host.pad.toUpperCase();setAnalog(!!roomState.host.analog);$('game-label').textContent='ORIGINAL '+roomState.host.console+' GAME · BROWSER STREAMING';}if(roomState.host.error&&roomState.host.game)message('The emulator stopped: '+roomState.host.error);renderDiagnostics();}
+  try{roomState=await api('state');renderSlots();renderGame();mirrorReceive(roomState.mirror);drawMirror();renderNowPlaying();renderActivity();reportPicker();const hz=roomState.host.emulationHz;$('host-info').textContent=!roomState.host.game?'No game loaded':roomState.host.core+' · '+(Number.isFinite(hz)?Math.round(hz)+'/':'')+roomState.host.fps+' Hz game'+(roomState.host.multitap==='none'?'':' · '+roomState.host.multitap+' multitap');if(roomState.host.console){$('pad-label').textContent='KEYBOARD → '+roomState.host.pad.toUpperCase();setAnalog(!!roomState.host.analog);$('game-label').textContent='ORIGINAL '+roomState.host.console+' GAME · BROWSER STREAMING';}if(roomState.host.error&&roomState.host.game)message('The emulator stopped: '+roomState.host.error);renderDiagnostics();}
   catch(e){message(e.message);}finally{polling=false;}
 }
 async function leaveRoom(notify=true){
   clearInput();const old=token;token=null;mine=-1;roomState=null;forgetCovers();library=null;pickerDrawn='';
-  pickerSent={open:false,focus:null,at:0};pickerFocus=null;pickerTouched=0;renderActivity();
+  pickerSent={open:false,at:0};pickerTouched=0;mirrorOut.on=false;mirrorIn=null;watching=watchOpened=false;unmirror();renderActivity();
   if(old)try{await fetch('api/leave',{method:'POST',headers:{Authorization:'Bearer '+old,'Content-Type':'application/json'},body:'{}'});}catch{}
   const oldPC=pc;pc=null;channel=null;if(oldPC)oldPC.close();
   const oldSocket=socket;socket=null;fallbackReady=false;if(oldSocket)oldSocket.close();
@@ -408,7 +494,7 @@ async function connectSocket(){
     ws.addEventListener('open',()=>ws.send(JSON.stringify({token})));
     ws.addEventListener('message',event=>{
       if(typeof event.data==='string'){
-        try{const data=JSON.parse(event.data);if(data.t==='ready'){sampleRate=data.sampleRate;fallbackReady=true;clearTimeout(timer);resolve();}else if(data.t==='pong')rtt=Math.round(performance.now()-data.sent);}catch{}
+        try{const data=JSON.parse(event.data);if(data.t==='ready'){sampleRate=data.sampleRate;fallbackReady=true;clearTimeout(timer);resolve();}else if(data.t==='pong')rtt=Math.round(performance.now()-data.sent);else if(data.t==='mirror')mirrorReceive(data);}catch{}
       }else{const bytes=new Uint8Array(event.data);if(bytes[0]===1){latestJPEG=event.data.slice(1);void drawJPEG();}else if(bytes[0]===2)playPCM(event.data.slice(1));}
     });
     ws.addEventListener('error',()=>{clearTimeout(timer);reject(new Error('The host connection failed.'));});
@@ -428,7 +514,7 @@ $('join-form').addEventListener('submit',async event=>{
     pc=new RTCPeerConnection({iceServers:joined.iceServers});const peer=pc;
     peer.addTransceiver('video',{direction:'recvonly'});peer.addTransceiver('audio',{direction:'recvonly'});
     channel=peer.createDataChannel('controls',{ordered:false,maxRetransmits:0});
-    channel.addEventListener('message',event=>{try{const data=JSON.parse(event.data);if(data.t==='pong')rtt=Math.round(performance.now()-data.sent);}catch{}});
+    channel.addEventListener('message',event=>{try{const data=JSON.parse(event.data);if(data.t==='pong')rtt=Math.round(performance.now()-data.sent);else if(data.t==='mirror')mirrorReceive(data);}catch{}});
     peer.addEventListener('track',event=>{
       preferFreshPlayback(event.receiver);
       if(event.track.kind==='video'){incoming.addTrack(event.track);video.srcObject=incoming;video.play().catch(()=>message('Tap the video to start playback.'));}
@@ -453,7 +539,7 @@ $('join-form').addEventListener('submit',async event=>{
 $('leave').addEventListener('click',()=>leaveRoom());
 $('change-game').addEventListener('click',()=>{clearInput();pickerOpen=true;library=null;renderGame();renderActivity();reportPicker();});
 $('boot-screen').addEventListener('change',()=>{bootChosen=true;});
-$('close-picker').addEventListener('click',()=>{pickerOpen=false;pickerTouched=0;renderGame();renderActivity();reportPicker();});
+$('close-picker').addEventListener('click',()=>{if(watching){watchOpened=false;stopWatching();}pickerOpen=false;pickerTouched=0;renderGame();renderActivity();reportPicker();});
 $('stop-game').addEventListener('click',async()=>{if(!confirm('Stop '+roomState.host.game.title+' for everyone? Its memory card is saved.'))return;try{clearInput();await api('game/stop',{});pickerOpen=false;pickerTouched=0;}catch(e){message(e.message);}await refresh();});
 $('admin').addEventListener('submit',async event=>{event.preventDefault();try{await api('admin',{pin:$('admin-pin').value});$('admin-pin').value='';await refresh();}catch(e){message(e.message);}});
 $('spectate').addEventListener('click',async()=>{try{clearInput();await api('release',{});await refresh();message('You are watching. Choose an open slot to play.');}catch(e){message(e.message);}});

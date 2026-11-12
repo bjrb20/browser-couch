@@ -1,10 +1,12 @@
 import asyncio
+import json
 from pathlib import Path
 import tempfile
 import threading
 import time
 from unittest import IsolatedAsyncioTestCase, TestCase
 
+import aiohttp
 from aiohttp.test_utils import TestClient, TestServer
 from aiortc.codecs.opus import OpusEncoder
 
@@ -210,15 +212,12 @@ class ActivityTests(IsolatedAsyncioTestCase):
         self.assertEqual((await client.post('/api/picker', json=dict(open=True))).status, 401)
         self.assertEqual((await client.post('/api/picker', json=dict(open='yes'), headers=ann)).status, 400)
         await client.post('/api/admin', json=dict(pin='4321'), headers=ann)
-        response = await client.post('/api/picker', json=dict(open=True, focus=self.ids['Demo']), headers=ann)
+        response = await client.post('/api/picker', json=dict(open=True), headers=ann)
         self.assertEqual(response.status, 200)
-        self.assertEqual((await self.state(client, bob))['choosing'],
-                         [dict(name='Ann', yours=False, focus=dict(id=self.ids['Demo'], title='Demo'))])
+        self.assertEqual((await self.state(client, bob))['choosing'], [dict(name='Ann', yours=False)])
         self.assertTrue((await self.state(client, ann))['choosing'][0]['yours'])
-        # A focus that is not a library game is dropped, and no path or file name is ever sent.
-        await client.post('/api/picker', json=dict(open=True, focus='../ps2/Demo.elf'), headers=ann)
+        # No path or file name is ever sent.
         state = await self.state(client, bob)
-        self.assertIsNone(state['choosing'][0]['focus'])
         self.assertNotIn('.elf', str(state))
         self.assertNotIn('.cue', str(state))
 
@@ -287,6 +286,167 @@ class ActivityTests(IsolatedAsyncioTestCase):
         _, ann = await self.join(client)
         await client.post('/api/game', json=dict(id=self.ids['Demo'], bootScreen=False), headers=ann)
         self.assertLessEqual(room.change['until']-time.monotonic(), STARTED_FOR)
+
+
+class FakeChannel:
+    readyState = 'open'
+
+    def __init__(self):
+        self.sent = []
+
+    def send(self, text):
+        self.sent.append(json.loads(text))
+
+
+class MirrorTests(IsolatedAsyncioTestCase):
+    """The chooser's picker, read-only, for everyone else in the room."""
+    asyncSetUp, room, join = SwitchTests.asyncSetUp, SwitchTests.room, SwitchTests.join
+
+    async def players(self, admin_pin=None, names=('Ann', 'Bob')):
+        room, client = await self.room(admin_pin=admin_pin)
+        tokens = []
+        for name in names:
+            token, _ = await self.join(client, name)
+            room.clients[token]['channel'] = FakeChannel()
+            tokens.append(token)
+        return room, client, tokens
+
+    def push(self, room, token, s):
+        room.mirror_update(token, room.clients[token], dict(t='mirror', s=s))
+
+    def seen(self, room, token):
+        return room.clients[token]['channel'].sent
+
+    @staticmethod
+    async def text(ws):
+        """The next JSON message, past the video and sound the socket also carries."""
+        while True:
+            message = await asyncio.wait_for(ws.receive(), 2)
+            if message.type == aiohttp.WSMsgType.TEXT:
+                return json.loads(message.data)
+
+    def view(self, **changes):
+        return dict(dict(q='', c='all', y=0, h=None, p=None, o=None, l='d6'), **changes)
+
+    async def test_viewers_get_the_chooser_picker_and_the_chooser_gets_nothing_back(self):
+        room, client, (ann, bob) = await self.players()
+        self.push(room, ann, self.view(q='canyon', c='ps1', y=0.25, h=self.ids['Canyon Racer'], p=[0.5, 0.4], o=[0.2, 0.9]))
+        message = self.seen(room, bob)[-1]
+        self.assertEqual((message['t'], message['name']), ('mirror', 'Ann'))
+        self.assertEqual(message['s'], dict(q='canyon', c='ps1', y=0.25, h=self.ids['Canyon Racer'],
+                                            p=[0.5, 0.4], o=[0.2, 0.9], l='d6', sel=None))
+        self.assertEqual(self.seen(room, ann), [])
+        state = await (await client.get('/api/state', headers=dict(Authorization='Bearer '+ann))).json()
+        self.assertEqual((state['mirror']['yours'], state['mirror']['s']), (True, None))
+        state = await (await client.get('/api/state', headers=dict(Authorization='Bearer '+bob))).json()
+        self.assertEqual((state['mirror']['name'], state['mirror']['s']['q']), ('Ann', 'canyon'))
+
+    async def test_only_the_whitelisted_fields_are_passed_on_and_never_a_pin(self):
+        room, _, (ann, bob) = await self.players(admin_pin='4321')
+        room.clients[ann]['admin'] = True
+        self.push(room, ann, dict(self.view(q='demo'), pin='4321', adminPin='4321', password='4321',
+                                  keys=['4', '3', '2', '1'], value='4321', sel=self.ids['Demo']))
+        message = self.seen(room, bob)[-1]
+        self.assertEqual(set(message['s']), {'q', 'c', 'y', 'h', 'p', 'o', 'l', 'sel'})
+        self.assertIsNone(message['s']['sel'], 'only the host marks a choice')
+        self.assertNotIn('4321', json.dumps(message))
+        self.assertNotIn('4321', json.dumps(room.mirror_view(bob)))
+
+    async def test_a_player_who_may_not_choose_cannot_push_a_picker(self):
+        room, _, (ann, bob) = await self.players(admin_pin='4321')
+        self.push(room, ann, self.view(q='demo'))
+        self.assertIsNone(room.mirror)
+        self.assertEqual(self.seen(room, bob), [])
+        room.clients[ann]['admin'] = True
+        self.push(room, ann, self.view(q='demo'))
+        self.assertEqual(self.seen(room, bob)[-1]['s']['q'], 'demo')
+        # A player who may not choose cannot end someone else's mirror either.
+        self.push(room, bob, None)
+        self.assertEqual(room.mirror['name'], 'Ann')
+
+    async def test_one_chooser_at_a_time(self):
+        room, _, (ann, bob, cy) = await self.players(names=('Ann', 'Bob', 'Cy'))
+        self.push(room, ann, self.view(q='first'))
+        self.push(room, bob, self.view(q='second'))
+        self.assertEqual([m['s']['q'] for m in self.seen(room, cy)], ['first'])
+        self.assertEqual(room.mirror['name'], 'Ann')
+        self.push(room, ann, None)
+        self.push(room, bob, self.view(q='second'))
+        self.assertEqual(self.seen(room, cy)[-1]['name'], 'Bob', 'free once the first one closes')
+
+    async def test_values_are_cleaned_and_bad_ones_dropped(self):
+        room, _, (ann, bob) = await self.players()
+        self.push(room, ann, dict(q='x'*500 + '\u202e', c='../ps2', y=float('nan'), h='../ps1/Demo.cue',
+                                  p=[2, -1], o=['a', 1], l='desktop'))
+        s = self.seen(room, bob)[-1]['s']
+        self.assertEqual(s, dict(q='x'*40, c='all', y=0, h=None, p=[1.0, 0.0], o=None, l=None, sel=None))
+        self.push(room, ann, dict(q='a\x00b\u200bc', y=0.12345, p=[0.5]))
+        s = self.seen(room, bob)[-1]['s']
+        self.assertEqual((s['q'], s['y'], s['p']), ('a b c', 0.123, None))
+        self.push(room, ann, 'not a state')
+        self.assertEqual(len(self.seen(room, bob)), 2)
+
+    async def test_updates_are_rate_limited(self):
+        room, _, (ann, bob) = await self.players()
+        for n in range(100):
+            self.push(room, ann, self.view(q=str(n)))
+        self.assertLessEqual(len(self.seen(room, bob)), 25)
+
+    async def test_numbers_only_grow_so_a_late_update_is_dropped(self):
+        room, _, (ann, bob) = await self.players()
+        for q in ('a', 'b'):
+            self.push(room, ann, self.view(q=q))
+        self.push(room, ann, None)
+        numbers = [m['n'] for m in self.seen(room, bob)]
+        self.assertEqual(numbers, sorted(set(numbers)))
+
+    async def test_it_clears_on_close_leave_timeout_and_lost_right(self):
+        room, client, (ann, bob) = await self.players(admin_pin='4321')
+        room.clients[ann]['admin'] = True
+        self.push(room, ann, self.view())
+        self.push(room, ann, None)
+        self.assertIsNone(self.seen(room, bob)[-1]['s'])
+
+        self.push(room, ann, self.view())
+        room.mirror['until'] = 0  # its page went quiet
+        self.assertIsNone(room.mirror_view(bob)['s'])
+        self.assertIsNone(self.seen(room, bob)[-1]['s'])
+
+        self.push(room, ann, self.view())
+        room.clients[ann]['admin'] = False
+        self.assertIsNone(room.mirror_view(bob)['s'])
+
+        room.clients[ann]['admin'] = True
+        self.push(room, ann, self.view())
+        await client.post('/api/leave', json={}, headers=dict(Authorization='Bearer '+ann))
+        self.assertIsNone(room.mirror)
+        self.assertIsNone(self.seen(room, bob)[-1]['s'])
+
+    async def test_a_pick_marks_the_choice_for_viewers(self):
+        room, client, (ann, bob) = await self.players()
+        self.push(room, ann, self.view(h=self.ids['Canyon Racer']))
+        response = await client.post('/api/game', json=dict(id=self.ids['Demo']),
+                                     headers=dict(Authorization='Bearer '+ann))
+        self.assertEqual(response.status, 200)
+        sent = [m['s'] for m in self.seen(room, bob) if m['s']]
+        self.assertEqual((sent[-1]['sel'], sent[-1]['h']), (self.ids['Demo'], self.ids['Demo']))
+
+    async def test_over_the_websocket_and_a_pin_typed_on_the_page_never_reaches_a_viewer(self):
+        room, client = await self.room(admin_pin='4321')
+        ann, auth = await self.join(client)
+        bob, _ = await self.join(client, 'Bob')
+        await client.post('/api/admin', json=dict(pin='4321'), headers=auth)
+        async with client.ws_connect('/api/socket') as chooser, client.ws_connect('/api/socket') as viewer:
+            for ws, token in ((chooser, ann), (viewer, bob)):
+                await ws.send_json(dict(token=token))
+                self.assertEqual((await self.text(ws))['t'], 'ready')
+            await chooser.send_json(dict(t='mirror', s=dict(self.view(q='ruins'), pin='4321')))
+            await chooser.send_str(json.dumps(dict(t='mirror', s=self.view(q='y'*600))))  # too big: dropped
+            message = await self.text(viewer)
+            self.assertEqual((message['name'], message['s']['q']), ('Ann', 'ruins'))
+            self.assertNotIn('4321', json.dumps(message))
+            await chooser.send_json(dict(t='mirror', s=None))
+            self.assertIsNone((await self.text(viewer))['s'])
 
 
 class HubResizeTests(TestCase):

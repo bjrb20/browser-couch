@@ -8,9 +8,11 @@ import hmac
 import io
 import ipaddress
 import json
+import math
 import logging
 import os
 from pathlib import Path
+import re
 import secrets
 import ssl
 import time
@@ -39,6 +41,11 @@ CHOOSING_FOR = 15  # seconds an open picker counts without news from it; the pag
 BOOT_SECONDS = dict(ps1=12, ps2=16)
 STARTED_FOR = 3  # seconds "Starting" stays after the game is up, when there is no boot screen to wait for
 STOPPED_FOR = 6  # seconds everyone sees that a game was stopped
+# The chooser's picker, shown read-only to everyone else.
+MIRROR_FOR = 5  # seconds a mirror lasts without news; the page sends at least every 2
+MIRROR_RATE = 25  # updates a second from the chooser, at most; the page sends at most 20
+MIRROR_SEARCH = 40  # characters of search text
+LAYOUT = re.compile(r'[pd][0-9]{1,2}')  # phone or desktop, and how many columns of cards
 log = logging.getLogger('stream')
 
 
@@ -117,7 +124,10 @@ class Room:
         self.jpeg_at = 0
         self.jpeg_data = b''
         self.sockets = set()
-        self.choosers = {}  # token -> {until, focus}: players with the game picker open
+        self.choosers = {}  # token -> {until}: players with the game picker open
+        # The chooser's picker, for others to watch. Its number only grows, even across restarts, so a page
+        # can drop an update older than one it has.
+        self.mirror, self.mirror_n, self.sends = None, time.time_ns() // 1_000_000, set()
         self.change = None  # {kind: starting or stopped, game, by, until}: what everyone sees as games change
 
     def authenticate(self, request):
@@ -174,19 +184,18 @@ class Room:
                                       sourceFrameAgeMs=max(0, (time.monotonic()-captured)*1000) if captured else None,
                                       viewers=len(self.clients), canPick=self.can_pick(client),
                                       adminPin=bool(self.admin_pin) and bool(self.library),
-                                      choosing=self.choosing(token), change=self.changing()))
+                                      choosing=self.choosing(token), change=self.changing(),
+                                      mirror=self.mirror_view(token)))
 
     def choosing(self, token):
-        """Who has the game picker open, by the names the room already shows, and the game they are on."""
+        """Who has the game picker open, by the names the room already shows."""
         now, shown = time.monotonic(), []
         for owner, entry in list(self.choosers.items()):
             client = self.clients.get(owner)
             if not client or entry['until'] < now or not self.can_pick(client):
                 del self.choosers[owner]
                 continue
-            game = self.library.games.get(entry['focus']) if self.library and entry['focus'] else None
-            shown.append(dict(name=client['name'], yours=owner == token,
-                              focus=dict(id=game.id, title=game.name) if game else None))
+            shown.append(dict(name=client['name'], yours=owner == token))
         return shown
 
     def changing(self):
@@ -196,7 +205,7 @@ class Room:
         return {key: value for key, value in self.change.items() if key != 'until'} if self.change else None
 
     async def choose(self, request):
-        """The picker opened, moved to a game, or closed: {open, focus: game id or null}.
+        """The picker opened or closed: {open}.
 
         Only a player who may choose games can say they are choosing. An open picker that stops
         reporting is forgotten after CHOOSING_FOR seconds, so it never sticks.
@@ -217,10 +226,97 @@ class Room:
             return web.json_response(dict(ok=True))
         if not self.can_pick(client):
             raise web.HTTPForbidden(text='Enter the PIN to choose games')
-        focus = body.get('focus')
-        focus = focus if isinstance(focus, str) and self.library and focus in self.library.games else None
-        self.choosers[token] = dict(until=now+CHOOSING_FOR, focus=focus)
+        self.choosers[token] = dict(until=now+CHOOSING_FOR)
         return web.json_response(dict(ok=True))
+
+    def mirror_update(self, token, client, data):
+        """The chooser's picker, from the room channel, for everyone else to watch: {s: state or null}.
+
+        Only a player who may choose is shown, and only one at a time: a second open picker is not.
+        Only the fields mirror_state keeps are passed on, so nothing else a page sends (a PIN, any
+        other field) reaches another player.
+        """
+        now = time.monotonic()
+        calls = client.setdefault('mirror_calls', deque())
+        while calls and calls[0] < now-1:
+            calls.popleft()
+        if len(calls) >= MIRROR_RATE:
+            return
+        calls.append(now)
+        current = self.live_mirror()
+        if current and current['owner'] != token:
+            return
+        state = data.get('s')
+        if state is None:
+            if current:
+                self.end_mirror()
+            return
+        if not isinstance(state, dict) or not self.can_pick(client):
+            return
+        self.mirror_n += 1
+        self.mirror = dict(owner=token, name=client['name'], until=now+MIRROR_FOR, n=self.mirror_n,
+                           s=self.mirror_state(state))
+        self.broadcast_mirror()
+
+    def mirror_state(self, state):
+        """The search text, console filter, scroll (0-1), the game under the pointer or focus, the pointer
+        within the panel (0-1), the pointer within that game's card (0-1), and the layout."""
+        games = self.library.games if self.library else {}
+        def fraction(value):
+            return round(min(max(float(value), 0.0), 1.0), 3) \
+                if type(value) in (int, float) and math.isfinite(value) else None
+        def game(value):
+            return value if isinstance(value, str) and value in games else None
+        def point(value):
+            value = [fraction(v) for v in value] if isinstance(value, list) and len(value) == 2 else None
+            return value if value and None not in value else None
+        search, console, layout = state.get('q'), state.get('c'), state.get('l')
+        return dict(q=cover_art.plain(search[:MIRROR_SEARCH], MIRROR_SEARCH) if isinstance(search, str) else '',
+                    c=console if isinstance(console, str) and any(g.console == console for g in games.values())
+                    else 'all',
+                    y=fraction(state.get('y')) or 0, h=game(state.get('h')),
+                    p=point(state.get('p')), o=point(state.get('o')),
+                    l=layout if isinstance(layout, str) and LAYOUT.fullmatch(layout) else None,
+                    sel=None)  # the host sets the selection from the pick itself
+
+    def live_mirror(self):
+        """The mirror, or None once it has gone quiet or its chooser left or may no longer choose."""
+        mirror = self.mirror
+        if mirror and (mirror['until'] < time.monotonic() or mirror['owner'] not in self.clients
+                       or not self.can_pick(self.clients[mirror['owner']])):
+            self.end_mirror()
+        return self.mirror
+
+    def end_mirror(self):
+        self.mirror = None
+        self.mirror_n += 1
+        self.broadcast_mirror()
+
+    def mirror_view(self, token):
+        """What the room state says about the mirror; its number lets a page drop an older update."""
+        mirror = self.live_mirror()
+        yours = bool(mirror) and mirror['owner'] == token
+        return dict(n=self.mirror_n, name=mirror['name'] if mirror else None, yours=yours,
+                    s=mirror['s'] if mirror and not yours else None)
+
+    def broadcast_mirror(self):
+        """Send the mirror to everyone but the chooser, over the channel each one already has."""
+        mirror = self.mirror
+        text = json.dumps(dict(t='mirror', n=self.mirror_n, name=mirror['name'] if mirror else None,
+                               s=mirror['s'] if mirror else None), separators=(',', ':'))
+        for token, client in self.clients.items():
+            if mirror and token == mirror['owner']:
+                continue
+            channel, ws = client['channel'], client['ws']
+            try:
+                if channel and channel.readyState == 'open':
+                    channel.send(text)
+                elif ws and not ws.closed:
+                    task = asyncio.get_running_loop().create_task(ws.send_str(text))
+                    self.sends.add(task)
+                    task.add_done_callback(self.sends.discard)
+            except (ConnectionError, RuntimeError):
+                pass
 
     async def games(self, request):
         """The game library: console names, titles and ids only."""
@@ -431,6 +527,12 @@ class Room:
         token, client = self.authenticate(request)
         async with self.session.lock:
             self.choosers.pop(token, None)
+            if self.live_mirror() and self.mirror['owner'] == token:
+                # Everyone watching sees the chosen game picked out, then the mirror gives way to "Starting".
+                self.mirror_n += 1
+                self.mirror.update(until=time.monotonic()+3, n=self.mirror_n,
+                                   s=dict(self.mirror['s'], h=game.id, sel=game.id))
+                self.broadcast_mirror()
             cover = await asyncio.to_thread(self.covers.info, game) if self.covers else None
             self.change = dict(kind='starting', by=client['name'], until=None,
                                game=dict(id=game.id, title=game.name, console=game.console,
@@ -494,6 +596,8 @@ class Room:
     async def remove(self, token):
         client = self.clients.pop(token, None)
         self.choosers.pop(token, None)
+        if self.mirror and self.mirror['owner'] == token:
+            self.end_mirror()
         self.hub.forget(token)
         if client:
             await self.close_peer(client)
@@ -541,6 +645,8 @@ class Room:
                         self.hub.update(token, data.get('seq'), data.get('mask'), data.get('axes'))
                     elif data.get('t') == 'ping' and type(data.get('sent')) in (int, float):
                         channel.send(json.dumps(dict(t='pong', sent=data['sent'])))
+                    elif data.get('t') == 'mirror':
+                        self.mirror_update(token, client, data)
                 except (ValueError, TypeError):
                     return
 
@@ -623,7 +729,7 @@ class Room:
             for task in tasks:
                 task.add_done_callback(completed)
             async for event in ws:
-                if event.type != web.WSMsgType.TEXT:
+                if event.type != web.WSMsgType.TEXT or len(event.data) > 512:
                     continue
                 try:
                     data = json.loads(event.data)
@@ -634,6 +740,8 @@ class Room:
                         self.hub.update(token, data.get('seq'), data.get('mask'), data.get('axes'))
                     elif data.get('t') == 'ping' and type(data.get('sent')) in (int, float):
                         await ws.send_json(dict(t='pong', sent=data['sent']))
+                    elif data.get('t') == 'mirror':
+                        self.mirror_update(token, client, data)
                 except (ValueError, TypeError):
                     pass
         except (asyncio.TimeoutError, ValueError, TypeError):

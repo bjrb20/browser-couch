@@ -112,5 +112,14 @@ body[data-player="2"]{--me:var(--p2)}body[data-player="3"]{--me:var(--p3)}body[d
 .activity-text strong{font-size:14px;overflow-wrap:anywhere}
 .activity-text span{color:var(--muted);font-size:11px}
 .game.watched{outline:2px dashed var(--p2);outline-offset:2px}
+.game.chosen{outline:3px solid var(--green);outline-offset:2px}
+.activity-choosing button{margin-left:auto;padding:6px 10px;font-size:10px;flex:none}
+/* Watching the chooser's picker: read-only, with their pointer as a labelled ghost. */
+.picker-card.mirrored #library,.picker-card.mirrored #picker-tools{cursor:default}
+.ghost{position:absolute;left:0;top:0;z-index:5;pointer-events:none;display:flex;align-items:flex-start;transition:transform 70ms linear;will-change:transform}
+.ghost svg{fill:var(--p2);stroke:#06090b;stroke-width:1.2;filter:drop-shadow(1px 1px 0 #0009)}
+.ghost span{margin:16px 0 0 -2px;background:var(--p2);color:#06121a;font-size:10px;font-weight:700;padding:2px 6px;border-radius:3px;white-space:nowrap}
+@media(prefers-reduced-motion:reduce){.ghost{transition:none}}
 .picker-card .activity{margin:0 0 14px}
+.picker-tools>.activity{flex:1 1 100%;margin:0}
 aside>.activity{margin:0 0 14px}

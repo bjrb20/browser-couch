@@ -532,9 +532,17 @@ stream that never covers it:
 
 - **Choosing.** "Ann is choosing a game…" while a player who may choose has
   the list open over a running game, or is using it while no game runs. The
-  name is the one the room already shows. On a desktop, viewers also see the
-  game the chooser is pointing at, and its card is outlined in their list.
-  Phones neither send nor show this.
+  name is the one the room already shows.
+- **Watching.** Other players can watch the chooser's list live, read-only, in
+  their own games list: the search text and the list filtering as it is typed,
+  the console filter, the scroll, the game under the chooser's pointer or
+  keyboard focus, and the pick. A labelled pointer follows the chooser's mouse;
+  it hides when the pointer leaves the list or stops for a few seconds, and a
+  touch screen sends none. On a different layout (a phone watching a desktop)
+  it follows the chooser by game card rather than by position. With reduced
+  motion the pointer jumps instead of gliding. While no game runs, players who
+  cannot choose see this by themselves; over a running game it starts only
+  when they press "Watch", and goes back to the game after the pick.
 - **Starting.** The game's clean title and cover, and who chose it, from the
   pick until the console's boot screen has played. Then it clears.
 - **Stopped.** Who stopped which game, for a few seconds.
@@ -543,6 +551,14 @@ The host keeps this state. Only a player who may choose can say they are
 choosing, updates are rate-limited, and a list that stops reporting (a closed
 tab, a lost connection) is forgotten after 15 seconds. It shows names, titles
 and covers players can already see, never a path.
+
+Watching goes over the room's own connection, about 100 bytes at a time, at
+most 20 times a second and only when something changed. Only the fields above
+are sent: the search box's text, never key presses, and never the host PIN or
+any other field. The host passes on only a player who may choose, one at a
+time (a second open list is not shown), drops anything else in the message,
+limits how often it may change, and ends it when the list closes, the chooser
+leaves, or it goes quiet for 5 seconds.
 
 ### Now playing
 
