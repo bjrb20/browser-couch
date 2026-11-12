@@ -92,9 +92,22 @@ Use the left hand to move and the right hand for the buttons.
 A standard USB or Bluetooth gamepad works on the tailnet URL. Xbox, PS4 and PS5
 controllers use the PlayStation layout: A is Cross, B is Circle, X is Square and
 Y is Triangle. Connect the gamepad, then push a button while the tab is in front.
-If the page says that it does not know the layout, use Chrome, Edge or Safari. On a phone, use the touch buttons below
-the picture. Tap **Fullscreen** to put the buttons over the picture. Tap **✕** to
-leave fullscreen.
+If the page says that it does not know the layout, use Chrome, Edge or Safari.
+
+### On a phone
+
+The page fits a phone in portrait and landscape at normal zoom, with no
+sideways scrolling. Buttons are at least 44 px tall, and text fields use 16 px
+text so the phone does not zoom in when you tap one.
+
+- **Portrait:** the picture fills the width and the touch buttons sit below it.
+  Tap **Fullscreen** to put the buttons over the picture.
+- **Landscape:** while a game runs, the picture fills the screen by itself, with
+  the D-pad, shoulder buttons and Select on the left and the face buttons,
+  shoulder buttons and Start on the right. Tap **✕** to go back to the page,
+  for example to tap **Enable sound** or watch the host's games list. The page
+  then shows the picture at the size that fits. It fills the screen again the
+  next time you turn the phone.
 
 ### LAN on plain HTTP
 

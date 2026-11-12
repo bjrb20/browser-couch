@@ -231,7 +231,7 @@ async function pick(game,item){
 }
 function renderGame(){
   const game=roomState?.host.game,show=Boolean(token&&roomState&&(!game||pickerOpen));
-  $('change-game').hidden=!token||!game||!roomState?.canPick&&!roomState?.adminPin;$('game-picker').hidden=!show;$('screen').classList.toggle('picking',show);
+  $('change-game').hidden=!token||!game||!roomState?.canPick&&!roomState?.adminPin;$('game-picker').hidden=!show;$('screen').classList.toggle('picking',show);fitSideways();
   if(show)void loadLibrary();
 }
 // Room activity: who has the picker open, and the game starting or just stopped, for everyone in the room.
@@ -492,7 +492,7 @@ async function leaveRoom(notify=true){
   lastSentMask=null;lastSentAt=0;receiverBufferMs=null;receivedToDisplayMs=null;previousJitter=null;
   pickerOpen=false;library=null;bootChosen=false;$('change-game').hidden=true;renderNowPlaying();
   $('join-panel').hidden=false;$('game-picker').hidden=true;$('loading').hidden=true;$('join').disabled=false;$('sound').disabled=true;$('leave').disabled=true;
-  $('screen').classList.remove('playing');
+  $('screen').classList.remove('playing');fitSideways();
   $('stream-info').textContent='Waiting for a stream';document.querySelector('.live').classList.remove('active');connected('Not connected');renderSlots();
   if(notify)message('You left the room. Your player slot has been released.');
 }
@@ -576,7 +576,7 @@ $('join-form').addEventListener('submit',async event=>{
     }catch{message('Using the compatible stream connection…');await connectSocket();}
     await refresh();const free=roomState.slots.findIndex(s=>!s.name);if(free>=0){await api('claim',{slot:free});await refresh();}
     $('join-panel').hidden=true;$('loading').hidden=true;$('sound').disabled=false;$('leave').disabled=false;connected(mine>=0?'Player '+(mine+1)+' connected':'Watching',true);
-    $('screen').classList.add('playing');
+    $('screen').classList.add('playing');fitSideways();
     message(mine===0?'You are Player 1. Use Enter / Start and Cross to navigate the original game.':mine>0?'You are Player '+(mine+1)+'. Wait for Player 1 to choose multiplayer.':'All player slots are occupied. You can watch the game.');
     $('join').blur();focused=document.hasFocus();
   }catch(error){await leaveRoom(false);message(error.message);}finally{joining=false;}
@@ -598,8 +598,18 @@ $('sound').addEventListener('click',async()=>{muted=!muted;rtcAudio.muted=muted;
 // so the .immersive class alone fills the window there.
 const pad=$('touch-pad'),padHome=document.createComment('touch-pad');pad.before(padHome);
 function immersive(on){$('screen').classList.toggle('immersive',on);if(on)$('screen').append(pad);else padHome.after(pad);}
-function leaveFullscreen(){if(document.fullscreenElement)document.exitFullscreen?.();immersive(false);}
-$('fullscreen').addEventListener('click',()=>{immersive(true);$('screen').requestFullscreen?.().catch(()=>{});});
+function leaveFullscreen(){if(autoImmersive)sidewaysDeclined=true;autoImmersive=false;if(document.fullscreenElement)document.exitFullscreen?.();immersive(false);}
+$('fullscreen').addEventListener('click',()=>{autoImmersive=false;immersive(true);$('screen').requestFullscreen?.().catch(()=>{});});
+// A phone turned on its side while a game streams gets the same full-window view, picture and touch pad only.
+// Turning it upright again, opening the games list or ✕ returns to the page; after ✕ it waits for the next turn.
+const sideways=matchMedia('(pointer:coarse) and (orientation:landscape) and (max-height:540px)');
+let autoImmersive=false,sidewaysDeclined=false;
+function fitSideways(){
+  const screen=$('screen'),want=sideways.matches&&!sidewaysDeclined&&screen.classList.contains('playing')&&Boolean(roomState?.host?.game)&&$('game-picker').hidden;
+  if(want&&!screen.classList.contains('immersive')){autoImmersive=true;immersive(true);}
+  else if(!want&&autoImmersive){autoImmersive=false;if(!document.fullscreenElement)immersive(false);}
+}
+sideways.addEventListener('change',()=>{sidewaysDeclined=false;fitSideways();});
 $('exit-fullscreen').addEventListener('click',leaveFullscreen);
 document.addEventListener('fullscreenchange',()=>{if(!document.fullscreenElement)immersive(false);});
 video.addEventListener('click',()=>video.play().catch(()=>{}));
