@@ -112,6 +112,27 @@ text so the phone does not zoom in when you tap one.
   then shows the picture at the size that fits. It fills the screen again the
   next time you turn the phone.
 
+#### Switching apps, locking the phone and network drops
+
+The page reconnects by itself and keeps your slot, name and host controls:
+
+- **When it reconnects:** when you come back to the tab (from another app, the
+  lock screen or the browser's page cache), when the phone gets its network
+  back, and whenever the stream drops: the connection fails or closes, the
+  picture track ends, or no new frame arrives for 8 seconds. A page in the
+  background waits until you come back, so it uses no data while hidden.
+- While it works, the picture shows **Reconnecting…**. Failed tries repeat
+  after 1, 2, 4… up to 30 seconds. Tap **Reconnect** below the picture to try
+  at once, or any time the picture looks stuck.
+- Back on the page, it starts the video and sound again, since phones often
+  pause them in the background.
+- **Away more than about 30 seconds:** the host lets the slot go. A remembered
+  device rejoins by itself and takes the slot back if it is still free. A
+  device that is not remembered shows the join form with your name filled in,
+  so you only type the room code.
+- If someone took your slot meanwhile, you come back watching and the page
+  says so. A player the host removed stays out.
+
 ### LAN on plain HTTP
 
 1. Start the host with `--host 0.0.0.0`. The default port is 8081.

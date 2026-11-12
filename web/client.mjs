@@ -10,7 +10,7 @@ let analog=false,lastSentAxes='';
 const incoming=new MediaStream(),incomingAudio=new MediaStream();
 async function api(path,body){
   const response=await fetch('api/'+path,{method:body===undefined?'GET':'POST',headers:{'Content-Type':'application/json',...(token?{Authorization:'Bearer '+token}:{})},...(body===undefined?{}:{body:JSON.stringify(body)})});
-  if(!response.ok){const error=new Error((await response.text()).slice(0,240));error.status=response.status;throw error;}return response.json();
+  if(!response.ok){const error=new Error((await response.text()).slice(0,240));error.status=response.status;error.ended=response.headers.has('X-Sofa-Ended');throw error;}return response.json();
 }
 function message(text){$('message').textContent=text;}
 function connected(text,active=false){$('connection').textContent=text;$('connection').classList.toggle('connected',active);}
@@ -531,7 +531,7 @@ function refresh(){
 async function refreshOnce(){
   if(!token)return;polling=true;
   try{roomState=await api('state');renderSlots();renderGame();mirrorReceive(roomState.mirror);drawMirror();renderNowPlaying();renderActivity();reportPicker();const hz=roomState.host.emulationHz;$('host-info').textContent=!roomState.host.game?'No game loaded':roomState.host.core+' · '+(Number.isFinite(hz)?Math.round(hz)+'/':'')+roomState.host.fps+' Hz game'+(roomState.host.multitap==='none'?'':' · '+roomState.host.multitap+' multitap');if(roomState.host.console){$('pad-label').textContent='KEYBOARD → '+roomState.host.pad.toUpperCase();setAnalog(!!roomState.host.analog);$('game-label').textContent='ORIGINAL '+roomState.host.console+' GAME · BROWSER STREAMING';}if(roomState.host.error&&roomState.host.game)message('The emulator stopped: '+roomState.host.error);renderDiagnostics();}
-  catch(e){if(e.status===401&&token){await leaveRoom(false,false);message(e.message);}else message(e.message);}finally{polling=false;}
+  catch(e){if(e.status===401&&token){if(e.ended){await leaveRoom(false,false);message(e.message);}else void reconnect();}else if(!reconnecting)message(e.message);}finally{polling=false;}
 }
 // `call`: tell the host. Not when the host has already ended this connection.
 async function leaveRoom(notify=true,call=true){
@@ -539,15 +539,13 @@ async function leaveRoom(notify=true,call=true){
   pickerSent={open:false,at:0};pickerTouched=0;mirrorOut.on=false;mirrorIn=null;mirrorHidden=null;unmirror();renderActivity();
   let left=null;
   if(old&&call)try{const r=await fetch('api/leave',{method:'POST',headers:{Authorization:'Bearer '+old,'Content-Type':'application/json'},body:'{}'});if(r.ok)left=await r.json();}catch{}
-  const oldPC=pc;pc=null;channel=null;if(oldPC)oldPC.close();
-  const oldSocket=socket;socket=null;fallbackReady=false;if(oldSocket)oldSocket.close();
-  latestJPEG=null;$('fallback').hidden=true;video.hidden=false;
+  closeStream();streamUp=false;heldSlot=-1;pendingReconnect=false;clearTimeout(retryTimer);retryIn=1;reconnectingShown(false);
+  $('fallback').hidden=true;video.hidden=false;
   if(audioContext){void audioContext.close().catch(()=>{});audioContext=null;audioGain=null;}muted=true;audioAt=0;video.muted=true;$('sound').textContent='Enable sound';
-  incoming.getTracks().forEach(t=>{t.stop();incoming.removeTrack(t);});video.srcObject=null;
-  incomingAudio.getTracks().forEach(t=>{t.stop();incomingAudio.removeTrack(t);});rtcAudio.srcObject=null;rtcAudio.muted=true;
+  video.srcObject=null;rtcAudio.srcObject=null;rtcAudio.muted=true;
   lastSentMask=null;lastSentAt=0;receiverBufferMs=null;receivedToDisplayMs=null;previousJitter=null;
   pickerOpen=false;library=null;bootChosen=false;$('change-game').hidden=true;renderNowPlaying();
-  $('join-panel').hidden=false;$('game-picker').hidden=true;$('loading').hidden=true;$('join').disabled=false;$('sound').disabled=true;$('leave').disabled=true;
+  $('join-panel').hidden=false;$('game-picker').hidden=true;$('loading').hidden=true;$('join').disabled=false;$('sound').disabled=true;$('leave').disabled=true;$('reconnect').disabled=true;
   $('screen').classList.remove('playing');fitSideways();
   $('stream-info').textContent='Waiting for a stream';document.querySelector('.live').classList.remove('active');connected('Not connected');renderSlots();
   showRejoin(left?.remembered?left.name:null);
@@ -616,7 +614,7 @@ async function connectSocket(){
       }else{const bytes=new Uint8Array(event.data);if(bytes[0]===1){latestJPEG=event.data.slice(1);void drawJPEG();}else if(bytes[0]===2)playPCM(event.data.slice(1));}
     });
     ws.addEventListener('error',()=>{clearTimeout(timer);reject(new Error('The host connection failed.'));});
-    ws.addEventListener('close',()=>{clearTimeout(timer);if(socket!==ws)return;fallbackReady=false;clearInput();connected('Connection interrupted');message('The host disconnected. Leave and rejoin to try again.');reject(new Error('The host disconnected.'));});
+    ws.addEventListener('close',()=>{clearTimeout(timer);if(socket!==ws)return;fallbackReady=false;clearInput();reject(new Error('The host disconnected.'));streamLost();});
   });
 }
 // A relay that the network blocks keeps gathering open. After the timeout, use the candidates found so far.
@@ -634,17 +632,41 @@ $('join-form').addEventListener('submit',async event=>{
 async function enter(joined){
   $('join').disabled=true;$('rejoin-button').disabled=true;$('loading').hidden=false;connected('Connecting');
   try{
-    token=joined.token;$('name').value=joined.name||$('name').value;showRejoin(null);
-    pc=new RTCPeerConnection({iceServers:joined.iceServers});const peer=pc;
+    token=joined.token;iceServers=joined.iceServers||[];$('name').value=joined.name||$('name').value;showRejoin(null);
+    await openStream();
+    // A rejoin already has its old slot back, if it was free. Otherwise take the first open one.
+    await refresh();const wanted=joined.wanted;
+    if(joined.slot==null&&(joined.token&&!('wanted' in joined)||typeof wanted==='number')){const free=roomState.slots.findIndex(s=>!s.name);if(free>=0){expectedMine=free;await api('claim',{slot:free});await refresh();}}
+    $('join-panel').hidden=true;$('loading').hidden=true;$('sound').disabled=false;$('leave').disabled=false;$('reconnect').disabled=false;connected(mine>=0?'Player '+(mine+1)+' connected':'Watching',true);
+    streamUp=true;heldSlot=mine;lastProgress=performance.now();
+    $('screen').classList.add('playing');fitSideways();
+    const taken=typeof wanted==='number'&&mine!==wanted?'Player '+(wanted+1)+' was taken. ':'';
+    message(taken+(mine===0?'You are Player 1. Use Enter / Start and Cross to navigate the original game.':mine>0?'You are Player '+(mine+1)+'. Wait for Player 1 to choose multiplayer.':'wanted' in joined&&wanted===null?'Welcome back. You are watching: choose an open slot to play.':'All player slots are occupied. You can watch the game.'));
+    $('join').blur();focused=document.hasFocus();
+  }catch(error){await leaveRoom(false);message(error.message);}finally{$('rejoin-button').disabled=false;}
+}
+// The picture, sound and controls for the current connection: WebRTC, else the WebSocket fallback.
+// Called again to reconnect; the host swaps the old stream for the new one and keeps the slot.
+async function openStream(){
+    closeStream();
+    // No WebRTC in this browser (or it is turned off): use the fallback stream.
+    try{pc=new RTCPeerConnection({iceServers});}catch{pc=null;await connectSocket();return;}const peer=pc;
     peer.addTransceiver('video',{direction:'recvonly'});peer.addTransceiver('audio',{direction:'recvonly'});
     channel=peer.createDataChannel('controls',{ordered:false,maxRetransmits:0});
     channel.addEventListener('message',event=>{try{roomMessage(JSON.parse(event.data));}catch{}});
     peer.addEventListener('track',event=>{
       preferFreshPlayback(event.receiver);
+      event.track.addEventListener('ended',()=>{if(peer===pc)streamLost();});
       if(event.track.kind==='video'){incoming.addTrack(event.track);video.srcObject=incoming;video.play().catch(()=>message('Tap the video to start playback.'));}
       else{incomingAudio.addTrack(event.track);rtcAudio.srcObject=incomingAudio;rtcAudio.muted=muted;rtcAudio.play().catch(()=>{});}
     });
-    peer.addEventListener('connectionstatechange',()=>{if(peer!==pc)return;if(['failed','disconnected'].includes(peer.connectionState)){clearInput();connected('Connection interrupted');message('Stream interrupted. Leave and rejoin; check the host firewall or ICE configuration.');}});
+    // Failed or closed: reconnect now. Disconnected often recovers by itself, so give it a few seconds.
+    peer.addEventListener('connectionstatechange',()=>{if(peer!==pc)return;const state=peer.connectionState;
+      if(state==='failed'||state==='closed')streamLost();
+      else if(state==='disconnected'){clearInput();connected('Connection interrupted');clearTimeout(graceTimer);graceTimer=setTimeout(()=>{if(peer===pc&&peer.connectionState==='disconnected')streamLost();},3000);}
+      else if(state==='connected'&&streamUp)connected(mine>=0?'Player '+(mine+1)+' connected':'Watching',true);});
+    peer.addEventListener('iceconnectionstatechange',()=>{if(peer===pc&&peer.iceConnectionState==='failed')streamLost();});
+    channel.addEventListener('close',()=>{if(peer===pc)streamLost();});
     await peer.setLocalDescription(await peer.createOffer());
     transport='webrtc';frames=0;lastFrames=0;audioPackets=0;lastStats=performance.now();
     try{
@@ -652,23 +674,98 @@ async function enter(joined){
       if(!peer.localDescription.sdp.includes('a=candidate:'))throw new Error('No WebRTC network candidates');
       const answer=await api('offer',{sdp:peer.localDescription.sdp,type:'offer'});await peer.setRemoteDescription(answer);
       await new Promise((resolve,reject)=>{const timer=setTimeout(()=>reject(new Error('WebRTC did not connect')),8000);if(channel.readyState==='open'){clearTimeout(timer);resolve();}else channel.addEventListener('open',()=>{clearTimeout(timer);resolve();},{once:true});});
-    }catch{message('Using the compatible stream connection…');await connectSocket();}
-    // A rejoin already has its old slot back, if it was free. Otherwise take the first open one.
-    await refresh();const wanted=joined.wanted;
-    if(joined.slot==null&&(joined.token&&!('wanted' in joined)||typeof wanted==='number')){const free=roomState.slots.findIndex(s=>!s.name);if(free>=0){expectedMine=free;await api('claim',{slot:free});await refresh();}}
-    $('join-panel').hidden=true;$('loading').hidden=true;$('sound').disabled=false;$('leave').disabled=false;connected(mine>=0?'Player '+(mine+1)+' connected':'Watching',true);
-    $('screen').classList.add('playing');fitSideways();
-    const taken=typeof wanted==='number'&&mine!==wanted?'Player '+(wanted+1)+' was taken. ':'';
-    message(taken+(mine===0?'You are Player 1. Use Enter / Start and Cross to navigate the original game.':mine>0?'You are Player '+(mine+1)+'. Wait for Player 1 to choose multiplayer.':'wanted' in joined&&wanted===null?'Welcome back. You are watching: choose an open slot to play.':'All player slots are occupied. You can watch the game.'));
-    $('join').blur();focused=document.hasFocus();
-  }catch(error){await leaveRoom(false);message(error.message);}finally{$('rejoin-button').disabled=false;}
+    }catch(error){
+      if(error.status===401||peer!==pc)throw error;  // the connection has gone, or a newer attempt took over
+      message('Using the compatible stream connection…');await connectSocket();
+    }
 }
+function closeStream(){
+  clearTimeout(graceTimer);
+  const oldPC=pc;pc=null;channel=null;if(oldPC)oldPC.close();
+  const oldSocket=socket;socket=null;fallbackReady=false;if(oldSocket)oldSocket.close();latestJPEG=null;
+  incoming.getTracks().forEach(t=>{t.stop();incoming.removeTrack(t);});
+  incomingAudio.getTracks().forEach(t=>{t.stop();incomingAudio.removeTrack(t);});
+}
+// Reconnecting after a drop: a phone that slept or switched apps, a network change, a host restart.
+// The same connection gets a new stream and keeps its slot. If the host has dropped the connection
+// (away over 30 s, or restarted), a remembered device rejoins with its cookie: same name, slot and host rights.
+// heldSlot: the slot this page had while its stream last worked, to take back after a drop.
+let heldSlot=-1,iceServers=[],streamUp=false,reconnecting=null,pendingReconnect=false,retryTimer=null,retryIn=1,graceTimer=null,lastProgress=0;
+function streamLost(){
+  if(!token||!streamUp)return;
+  streamUp=false;clearInput();void reconnect();
+}
+function healthy(){
+  return transport==='webrtc'?pc?.connectionState==='connected'&&channel?.readyState==='open':socket?.readyState===WebSocket.OPEN&&fallbackReady;
+}
+function reconnectingShown(on,text='Reconnecting…'){
+  const box=$('loading');box.classList.toggle('reconnecting',on);box.hidden=!on;box.lastElementChild.textContent=on?text:'Connecting to the host…';
+  if(on)connected('Reconnecting');
+}
+function reconnect(manual=false){
+  clearTimeout(retryTimer);
+  if(!token||joining)return Promise.resolve();
+  if(reconnecting)return reconnecting;
+  streamUp=false;
+  if(document.hidden&&!manual){pendingReconnect=true;return Promise.resolve();}  // a hidden page waits until it is back
+  pendingReconnect=false;
+  reconnecting=(async()=>{
+    const slot=mine>=0?mine:heldSlot;let resumed=null;reconnectingShown(true);clearInput();
+    try{
+      try{await openStream();}
+      catch(error){
+        if(error.status!==401)throw error;
+        if(error.ended){await leaveRoom(false,false);message(error.message);return;}
+        closeStream();const old=token;token=null;
+        const r=await api('resume',{rejoin:true});
+        if(!r.token){token=old;await leaveRoom(false,false);showRejoin(null);
+          message('You were away too long and the host let your slot go. Enter the room code to join again.');return;}
+        resumed=r;token=r.token;iceServers=r.iceServers||iceServers;await openStream();
+      }
+      await refresh();
+      if(!token)return;
+      // The host lets go of a slot when a stream drops. Take it back if nobody has it.
+      const want=resumed?(resumed.slot??resumed.wanted):slot;
+      if(typeof want==='number'&&want>=0&&mine<0&&roomState?.slots?.[want]&&!roomState.slots[want].name){
+        expectedMine=want;try{await api('claim',{slot:want});}catch{}await refresh();}
+      streamUp=true;heldSlot=mine;retryIn=1;lastProgress=performance.now();reconnectingShown(false);replayMedia();
+      connected(mine>=0?'Player '+(mine+1)+' connected':'Watching',true);
+      message(mine>=0?'Reconnected. You are Player '+(mine+1)+'.':slot>=0?'Reconnected. Player '+(slot+1)+' was taken meanwhile: choose an open slot to play.':'Reconnected. You are watching.');
+    }catch(error){
+      if(!token)return;
+      closeStream();
+      message('Could not reach the host ('+error.message+'). Trying again in '+retryIn+' s, or tap Reconnect.');
+      reconnectingShown(true,'Reconnecting… next try in '+retryIn+' s');
+      retryTimer=setTimeout(()=>void reconnect(),retryIn*1000);retryIn=Math.min(retryIn*2,30);
+    }finally{reconnecting=null;}
+  })();
+  return reconnecting;
+}
+// Mobile browsers pause playback in the background, and do not always start it again.
+function replayMedia(){
+  if(transport==='webrtc'){video.play().catch(()=>{});if(!muted)rtcAudio.play().catch(()=>{});}
+  else if(audioContext&&!muted)audioContext.resume().catch(()=>{});
+}
+// Back from another app, the lock screen, a cached page or a lost network: check the stream, and restart playback.
+function comeBack(){
+  if(!token||document.hidden)return;
+  lastProgress=performance.now();
+  if(pendingReconnect||!streamUp||!healthy()){void reconnect();return;}
+  replayMedia();void refresh();
+  const before=frames;  // a stream that looks connected but sends nothing: the stats count frames every 2 s
+  setTimeout(()=>{if(token&&streamUp&&!document.hidden&&frames===before)streamLost();},4500);
+}
+document.addEventListener('visibilitychange',comeBack);
+window.addEventListener('pageshow',event=>{if(event.persisted)comeBack();});
+window.addEventListener('online',comeBack);
+window.addEventListener('focus',()=>{if(token&&!streamUp)comeBack();});
 function roomMessage(data){
   if(data.t==='pong')rtt=Math.round(performance.now()-data.sent);
   else if(data.t==='mirror')mirrorReceive(data);
   else if(data.t==='seats'||data.t==='removed')void refresh();  // a slot changed: look now, not at the next poll
 }
 $('leave').addEventListener('click',()=>leaveRoom());
+$('reconnect').addEventListener('click',()=>{retryIn=1;streamUp=false;void reconnect(true);});
 $('rejoin-button').addEventListener('click',()=>resume(true));
 $('rejoin-forget').addEventListener('click',forgetDevice);
 $('forget').addEventListener('click',()=>{if(confirm('Log out and forget this device? You will need the room code to join again.'))void forgetDevice();});
@@ -731,7 +828,8 @@ function pollController(){sendInput();pollPicker();requestAnimationFrame(pollCon
 setInterval(()=>sendInput(),100);
 setInterval(()=>{send({t:'ping',sent:performance.now()});void refresh();},1000);
 setInterval(async()=>{
-  if(!controlReady())return;
+  if(!controlReady()){if(token&&streamUp&&!document.hidden&&performance.now()-lastProgress>8000)streamLost();return;}
+  if(streamUp)heldSlot=mine;
   if(pc&&transport==='webrtc'){const stats=await pc.getStats();stats.forEach(stat=>{if(stat.type==='inbound-rtp'&&stat.kind==='video'){
     frames=stat.framesDecoded||0;
     if(Number.isFinite(stat.jitterBufferDelay)&&Number.isFinite(stat.jitterBufferEmittedCount)){
@@ -739,8 +837,10 @@ setInterval(async()=>{
       if(count>0)receiverBufferMs=1000*delay/count;previousJitter={count:stat.jitterBufferEmittedCount,delay:stat.jitterBufferDelay};
     }
   }});}
-  const now=performance.now();streamFPS=Math.round((frames-lastFrames)*1000/(now-lastStats));lastFrames=frames;lastStats=now;
+  const now=performance.now();if(frames!==lastFrames)lastProgress=now;
+  else if(token&&streamUp&&!document.hidden&&now-lastProgress>8000)streamLost();  // no picture for 8 s
+  streamFPS=Math.round((frames-lastFrames)*1000/(now-lastStats));lastFrames=frames;lastStats=now;
   $('stream-info').textContent=(transport==='webrtc'?'WebRTC':'Fallback')+' · '+streamFPS+' fps'+(rtt===null?'':' · '+rtt+' ms RTT');document.querySelector('.live').classList.toggle('active',streamFPS>0);renderDiagnostics();
 },2000);
-window.streamRoom={get state(){return roomState;},get pc(){return pc;},get frames(){return frames;},get player(){return mine+1;},get transport(){return transport;},get audioPackets(){return audioPackets;},get diagnostics(){return {receiverBufferMs,receivedToDisplayMs,rtt,emulationHz:roomState?.host.emulationHz,inputPollMs:roomState?.inputPollMs};}};
+window.streamRoom={get state(){return roomState;},get pc(){return pc;},get socket(){return socket;},get streaming(){return streamUp;},get frames(){return frames;},get player(){return mine+1;},get transport(){return transport;},get audioPackets(){return audioPackets;},get diagnostics(){return {receiverBufferMs,receivedToDisplayMs,rtt,emulationHz:roomState?.host.emulationHz,inputPollMs:roomState?.inputPollMs};}};
 renderSlots();updatePads();void resume();

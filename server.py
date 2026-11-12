@@ -131,6 +131,7 @@ class Room:
         self.jpeg_at = 0
         self.jpeg_data = b''
         self.sockets = set()
+        self.closing = set()  # old sockets of pages that reconnected, closing in the background
         self.choosers = {}  # token -> {until}: players with the game picker open
         # The chooser's picker, for others to watch. Its number only grows, even across restarts, so a page
         # can drop an update older than one it has.
@@ -142,7 +143,11 @@ class Room:
         header = request.headers.get('Authorization', '')
         token = header[7:] if header.startswith('Bearer ') else ''
         if token not in self.clients:
-            raise web.HTTPUnauthorized(text=self.gone.get(token) or 'Join the room first')
+            # A connection the host ended on purpose says so, and the page must not rejoin by itself.
+            # Any other (idle too long, a restart) may: a remembered device comes straight back.
+            why = self.gone.get(token)
+            raise web.HTTPUnauthorized(text=why or 'Join the room first',
+                                       headers={'X-Sofa-Ended': 'yes'} if why else None)
         self.clients[token]['seen'] = time.monotonic()
         return token, self.clients[token]
 
@@ -825,6 +830,21 @@ class Room:
         self.push_seats()
         return web.json_response(dict(ok=True))
 
+    async def replace_stream(self, token, client):
+        """The same page opens a new stream (after a phone sleeps, say): end the old one, keep the slot.
+
+        Held buttons are let go, so nothing stays pressed across the gap.
+        """
+        if client['pc']:
+            client['pc'].replaced = True
+        old, client['ws'] = client['ws'], None
+        await self.close_peer(client)
+        self.hub.clear(token)
+        if old:  # not awaited: a socket to a phone that went away may take seconds to close
+            task = asyncio.create_task(old.close(code=1000, message=b'Reconnected'))
+            self.closing.add(task)
+            task.add_done_callback(self.closing.discard)
+
     async def close_peer(self, client):
         pc, client['pc'] = client['pc'], None
         client['channel'] = None
@@ -862,11 +882,10 @@ class Room:
 
     async def offer(self, request):
         token, client = self.authenticate(request)
-        if client['pc'] or client['ws']:
-            raise web.HTTPConflict(text='Already connected; leave before reconnecting')
         body = await request.json()
         if not isinstance(body, dict) or body.get('type') != 'offer' or not isinstance(body.get('sdp'), str):
             raise web.HTTPBadRequest(text='Invalid WebRTC offer')
+        await self.replace_stream(token, client)  # the page reconnecting: its old stream may not know it has gone
         pc = RTCPeerConnection(RTCConfiguration(iceServers=self.host_ice_servers))
         client['pc'] = pc
         tracks = [self.relay.subscribe(self.video, buffered=False),
@@ -903,12 +922,16 @@ class Room:
 
             @channel.on('close')
             def channel_close():
+                if getattr(pc, 'replaced', False):
+                    return
                 self.hub.clear(token)
                 if client['channel'] in (channel, None):
                     self.connection_lost(token)
 
         @pc.on('connectionstatechange')
         async def statechange():
+            if getattr(pc, 'replaced', False):
+                return  # the same page reconnected: it keeps its slot
             if pc.connectionState == 'failed':
                 self.hub.release(token)
                 self.connection_lost(token)
@@ -950,11 +973,11 @@ class Room:
             first = await asyncio.wait_for(ws.receive_json(), 5)
             token = first.get('token') if isinstance(first, dict) else None
             client = self.clients.get(token)
-            if not client or client['ws']:
+            if not client:
                 await ws.close(code=1008, message=b'Join the room first')
                 return ws
-            # A failed WebRTC negotiation may have left an unconnected peer.
-            await self.close_peer(client)
+            # A failed WebRTC negotiation may have left an unconnected peer; a reconnect, an old stream.
+            await self.replace_stream(token, client)
             client['ws'] = ws
             client['seen'] = time.monotonic()
             audio = self.relay.subscribe(self.audio, buffered=False)
