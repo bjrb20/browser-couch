@@ -546,12 +546,13 @@ stream that never covers it:
     sends none. On a different layout (a phone watching a desktop) it follows
     the chooser by game card rather than by position. With reduced motion the
     pointer jumps instead of gliding.
-  - Over a running game, it is a small panel in the strip instead: the search,
-    the console filter and the game the chooser is looking at. The game keeps
-    the keyboard, gamepad and touch controls, and on a phone the panel sits
-    below the touch controls.
+  - Over a running game, the same live list (pointer, search, filtering,
+    scroll, hover and pick) is docked under the strip instead: in the side
+    column on a desktop, below the touch controls on a phone. It never covers
+    the stream, and it takes no clicks, focus or keys, so the game keeps the
+    keyboard, gamepad and touch controls.
   - It never takes focus. A player typing in a field (the PIN, say) or using
-    their own list gets the small panel rather than the takeover.
+    their own list gets a one-line summary rather than the list.
   - "Hide" folds it to one line for this choosing session; "Show" opens it
     again. The next time someone opens the list, it opens again.
 - **Starting.** The game's clean title and cover, and who chose it, from the

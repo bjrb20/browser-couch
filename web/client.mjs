@@ -309,8 +309,10 @@ function typingHere(){
 }
 function mirrorMode(){
   const s=mirrorIn?.s;if(!s||!token||!roomState)return '';
-  if(s.sel)return mirrorShown?'full':'';  // "Starting" says it now
+  if(s.sel)return mirrorShown||'';  // "Starting" says it now
   if(mirrorHidden===mirrorIn.id)return 'min';
+  // Over a running game the list is docked beside the stream, read-only, so the game keeps its input.
+  if((roomState.host.game||roomState.host.loading)&&$('game-picker').hidden)return 'dock';
   const busy=typingHere()||!mirrorShown&&($('game-picker').contains(document.activeElement)||performance.now()-pickerUsed<5000);
   return !roomState.host.game&&!roomState.host.loading&&!$('game-picker').hidden&&!busy?'full':'compact';
 }
@@ -329,16 +331,19 @@ function mirrorTitle(id){
 function revealInPicker(el){const c=pickerCard.getBoundingClientRect(),r=el.getBoundingClientRect();
   if(r.top<c.top+8)pickerCard.scrollTop-=c.top+8-r.top;else if(r.bottom>c.bottom-8)pickerCard.scrollTop+=r.bottom-c.bottom+8;}
 function placeGhost(s,target,same){
-  const ghost=$('ghost'),base=$('game-picker').getBoundingClientRect();let x,y;
+  const ghost=$('ghost'),base=ghost.parentElement.getBoundingClientRect();let x,y;
   if(target&&(s.o||s.sel)){const r=target.getBoundingClientRect(),o=s.o||[.5,.5];x=r.left+o[0]*r.width;y=r.top+o[1]*r.height;}
   else if(same&&s.p){const c=pickerCard.getBoundingClientRect();x=c.left+s.p[0]*c.width;y=c.top+s.p[1]*c.height;}
   else{ghost.hidden=true;return;}
   ghost.lastElementChild.textContent=mirrorIn.name;ghost.hidden=false;ghost.style.transform=`translate(${Math.round(x-base.left)}px,${Math.round(y-base.top)}px)`;
 }
 function drawMirror(){
-  if(mirrorMode()!=='full'){if(mirrorShown)unmirror();return;}
+  const mode=mirrorMode();if(mirrorShown&&mirrorShown!==mode)unmirror();
+  if(mode!=='full'&&mode!=='dock')return;
   const s=mirrorIn.s;
-  if(!mirrorShown){mirrorShown=true;mirrorOwn={q:$('game-search').value,c:consoleFilter,y:pickerCard.scrollTop};pickerCard.classList.add('mirrored');mirrorLock(true);}
+  if(!mirrorShown){mirrorShown=mode;mirrorOwn={q:$('game-search').value,c:consoleFilter,y:pickerCard.scrollTop};pickerCard.classList.add('mirrored');
+    if(mode==='dock')dockPicker(true);else mirrorLock(true);}
+  if(mode==='dock'&&!library)void loadLibrary();  // it draws the mirror again once the list is in
   $('game-search').value=s.q;consoleFilter=library?.consoles.some(c=>c.id===s.c)?s.c:'all';filterLibrary();
   let target=null;
   for(const card of $('library').querySelectorAll('.game')){const id=card.dataset.id;
@@ -350,8 +355,16 @@ function drawMirror(){
 }
 // Read-only: the list and the search bar's controls, not the label pinned in the bar.
 function mirrorLock(on){for(const el of [$('library'),...$('picker-tools').children])if(el!==$('activity'))el.inert=on;}
+// Over a running game the same list moves out of the screen into a dock under the room strip: inert, so it
+// takes no focus, clicks or keys, and #game-picker stays hidden, so the game's keyboard and gamepad still work.
+const pickerDock=document.createElement('div');pickerDock.className='picker-dock';
+function dockPicker(on){
+  if(on){pickerDock.append(pickerCard,$('ghost'));pickerCard.inert=true;placeActivity();}
+  else{$('game-picker').append(pickerCard,$('ghost'));pickerCard.inert=false;pickerDock.remove();}
+}
 function unmirror(){
-  mirrorShown=false;pickerCard.classList.remove('mirrored');mirrorLock(false);$('ghost').hidden=true;
+  if(mirrorShown==='dock')dockPicker(false);else mirrorLock(false);
+  mirrorShown=false;pickerCard.classList.remove('mirrored');$('ghost').hidden=true;
   for(const card of $('library').querySelectorAll('.watched,.chosen'))card.classList.remove('watched','chosen');
   if(mirrorOwn){$('game-search').value=mirrorOwn.q;consoleFilter=mirrorOwn.c;filterLibrary();pickerCard.scrollTop=mirrorOwn.y;mirrorOwn=null;}
 }
@@ -365,16 +378,20 @@ function activityArtwork(span,game){
     if(span.isConnected){const img=new Image();img.alt='';img.src=url;span.className='activity-art';span.replaceChildren(img);}}).catch(()=>{});
 }
 let activityDrawn='';
-function renderActivity(){
+function placeActivity(){
   // Always in view and never over the stream: at the top of the games list while that shows, else at the top
   // of the side column on a wide screen, else under the stream.
   const box=$('activity'),aside=$('now-playing').parentElement;
   // While watching it stays pinned in the search bar, so the chooser's name scrolls with nothing.
-  if(mirrorShown){if($('picker-tools').firstElementChild!==box)$('picker-tools').prepend(box);}
+  if(mirrorShown==='full'){if($('picker-tools').firstElementChild!==box)$('picker-tools').prepend(box);}
   else if(!$('game-picker').hidden){if(box.previousElementSibling!==$('picker-note'))$('picker-note').after(box);}
   else if(!phone.matches){if(aside.firstElementChild!==box)aside.prepend(box);}
   else{const pad=$('touch-pad'),home=pad.parentElement!==$('screen')&&getComputedStyle(pad).display!=='none'?pad:document.querySelector('.screen-bar');
     if(box.previousElementSibling!==home)home.after(box);}  // a phone: under the stream, and under its touch controls
+  if(mirrorShown==='dock'&&box.nextElementSibling!==pickerDock)box.after(pickerDock);
+}
+function renderActivity(){
+  placeActivity();const box=$('activity');
   const change=token?roomState?.change:null,others=token?(roomState?.choosing||[]).filter(c=>!c.yours):[],mode=mirrorMode();
   const live=mode&&!mirrorIn.s.sel?mirrorIn.name:null,names=[...new Set([...(live?[live]:[]),...others.map(c=>c.name)])];
   const s=mode==='compact'?mirrorIn.s:null,looking=s?mirrorTitle(s.h):null;
@@ -391,7 +408,7 @@ function renderActivity(){
   if(names.length){
     const row=document.createElement('div'),dot=document.createElement('i'),text=document.createElement('span');row.className='activity-choosing'+(s?' compact':'');
     const list=names.length>2?names.slice(0,-1).join(', ')+' and '+names.at(-1):names.join(' and ');
-    const head=document.createElement('span');head.textContent=list+(names.length>1?' are':' is')+' choosing a game…'+(mode==='full'?' · watching live':'');text.append(head);
+    const head=document.createElement('span');head.textContent=list+(names.length>1?' are':' is')+' choosing a game…'+(mode==='full'||mode==='dock'?' · watching live':'');text.append(head);
     if(s){  // what the chooser's list shows, in a line or two
       const what=[s.q?'Searching “'+s.q+'”':'',s.c!=='all'?'Showing '+s.c.toUpperCase():''].filter(Boolean).join(' · ');
       if(what){const line=document.createElement('small');line.textContent=what;text.append(line);}

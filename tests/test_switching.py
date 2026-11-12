@@ -471,6 +471,21 @@ class MirrorTests(IsolatedAsyncioTestCase):
         sent = [m['s'] for m in self.seen(room, bob) if m['s']]
         self.assertEqual((sent[-1]['sel'], sent[-1]['h']), (self.ids['Demo'], self.ids['Demo']))
 
+    async def test_over_a_running_game_viewers_get_the_whole_list_pointer_included(self):
+        room, client, (ann, bob) = await self.players()
+        auth = dict(Authorization='Bearer '+ann)
+        self.assertEqual((await client.post('/api/game', json=dict(id=self.ids['Demo']), headers=auth)).status, 200)
+        await asyncio.sleep(0.05)
+        self.assertTrue((await (await client.get('/api/state', headers=auth)).json())['host']['game'])
+        view = self.view(q='can', c='ps1', y=0.4, h=self.ids['Canyon Racer'], p=[0.25, 0.5], o=[0.1, 0.9], l='d6')
+        self.push(room, ann, view)
+        self.assertEqual(self.seen(room, bob)[-1]['s'], dict(view, sel=None), 'nothing is held back while a game runs')
+        state = await (await client.get('/api/state', headers=dict(Authorization='Bearer '+bob))).json()
+        self.assertEqual(state['mirror']['s'], dict(view, sel=None), 'nor from a player who joins now')
+        await client.post('/api/game', json=dict(id=self.ids['Canyon Racer']), headers=auth)
+        picked = [m['s'] for m in self.seen(room, bob) if m['s'] and m['s']['sel']]
+        self.assertEqual(picked[-1]['sel'], self.ids['Canyon Racer'], 'a switch is picked out too')
+
     async def test_after_a_pick_it_ends_by_itself_and_the_next_look_is_a_new_session(self):
         room, client, (ann, bob) = await self.players()
         with mock.patch.object(server, 'MIRROR_PICKED', 0.3):

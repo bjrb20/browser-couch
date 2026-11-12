@@ -127,3 +127,11 @@ body[data-player="2"]{--me:var(--p2)}body[data-player="3"]{--me:var(--p3)}body[d
 .picker-card .activity{margin:0 0 14px}
 .picker-tools>.activity{flex:1 1 100%;margin:0}
 aside>.activity{margin:0 0 14px}
+/* Over a running game the chooser's list is docked under the room strip, read-only: search, console filter and cards. */
+.picker-dock{position:relative;margin:0 0 14px}
+.picker-dock .join-card.picker-card{width:auto;max-width:none;max-height:min(52vh,420px);padding:0 10px 10px;box-shadow:none;border-radius:4px}
+.picker-dock .picker-card>:not(.picker-tools):not(#library):not(#no-match),.picker-dock .console>p,.picker-dock .cover-tools,.picker-dock .fetch-note{display:none}
+.picker-dock .picker-tools{top:0;padding:8px 0;margin:0 0 4px}
+.picker-dock .picker-tools input{padding:7px 9px;font-size:12px}
+.picker-dock .console h3{margin:6px 0 8px;font-size:12px}
+.picker-dock .games{grid-template-columns:repeat(auto-fill,minmax(78px,1fr));gap:8px}
