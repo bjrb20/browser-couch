@@ -1,8 +1,11 @@
 """Cover art for library games, keyed by the same game id as the saves.
 
-Two sources, checked in this order:
+Three sources, checked in this order:
 - an image an admin uploaded, kept in the covers folder as <game id>.jpg;
-- cover.jpg, cover.jpeg or cover.png in a game's own folder in the library.
+- cover.jpg, cover.jpeg or cover.png in a game's own folder in the library;
+- art a metadata provider found (metadata.py), in fetched/<game id>.jpg, with
+  the game's details in fetched/<game id>.json. Fetching never touches the
+  other two, so a cover a person chose always wins.
 
 Every image is decoded and re-encoded here before a browser sees it: JPEG,
 PNG or WebP by content, at most MAX_SIZE on each side, as a JPEG with no
@@ -10,6 +13,7 @@ metadata. Browsers only ever name a game id, never a path.
 """
 from collections import OrderedDict
 import hashlib
+import json
 from io import BytesIO
 import os
 from pathlib import Path
@@ -77,9 +81,32 @@ class Covers:
         self.library_root = Path(library_root).resolve() if library_root else None
         self.cache = OrderedDict()  # (path, mtime, size) -> encoded library cover
         self.cache_size = cache
+        self.records = {}  # game id -> (mtime_ns, fetched record)
 
     def uploaded(self, game_id):
         return self.root/f'{checked_id(game_id)}.jpg' if self.root else None
+
+    def fetched(self, game_id, suffix='.jpg'):
+        return self.root/'fetched'/f'{checked_id(game_id)}{suffix}' if self.root else None
+
+    def record(self, game_id):
+        """What a provider found for the game, {sources, about, note, fetched}, or None if never fetched."""
+        path = self.fetched(game_id, '.json')
+        stat = self._stat(path)
+        if not stat:
+            self.records.pop(game_id, None)
+            return None
+        cached = self.records.get(game_id)
+        if cached and cached[0] == stat.st_mtime_ns:
+            return cached[1]
+        try:
+            record = json.loads(path.read_text())
+        except (OSError, ValueError):
+            return None
+        if not isinstance(record, dict):
+            return None
+        self.records[game_id] = (stat.st_mtime_ns, record)
+        return record
 
     def sidecar(self, game):
         """cover.jpg or cover.png in the game's own folder, not one the console's games share."""
@@ -107,6 +134,9 @@ class Covers:
         stat = self._stat(path)
         if stat:
             return dict(version=self._version('f', stat), uploaded=False)
+        stat = self._stat(self.fetched(game.id))
+        if stat:
+            return dict(version=self._version('m', stat), uploaded=False, fetched=True)
         return None
 
     @staticmethod
@@ -124,7 +154,11 @@ class Covers:
         path = self.sidecar(game)
         stat = self._stat(path)
         if not stat:
-            return None
+            try:
+                fetched = self.fetched(game.id)
+                return fetched.read_bytes() if fetched and fetched.is_file() else None
+            except OSError:
+                return None
         key = (str(path), stat.st_mtime_ns, stat.st_size)
         if key in self.cache:
             self.cache.move_to_end(key)
@@ -145,9 +179,23 @@ class Covers:
         """Store an upload's clean JPEG, replacing any earlier one. `data` is from encode()."""
         if not self.root:
             raise OSError('No covers folder')
-        path = self.uploaded(game_id)
-        self.root.mkdir(parents=True, exist_ok=True)
-        temporary = self.root/f'.{game_id}.{secrets.token_hex(4)}.tmp'
+        self._write(self.uploaded(game_id), data)
+
+    def store_fetched(self, game_id, art, record):
+        """Keep what a provider found: art (from encode()) or None, and the record.
+
+        Without new art, earlier fetched art stays. Uploads are never touched.
+        """
+        if not self.root:
+            raise OSError('No covers folder')
+        if art:
+            self._write(self.fetched(game_id), art)
+        self._write(self.fetched(game_id, '.json'), json.dumps(record).encode())
+
+    @staticmethod
+    def _write(path, data):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = path.parent/f'.{path.name}.{secrets.token_hex(4)}.tmp'
         try:
             with open(temporary, 'wb') as file:
                 file.write(data)

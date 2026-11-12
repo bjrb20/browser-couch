@@ -193,6 +193,8 @@ def command(env, ice):
         args += ['--trusted-proxy', setting(env, 'SOFA_TRUSTED_PROXY')]
     if ice:
         args += ['--ice-config', str(ice)]
+    if setting(env, 'SOFA_METADATA'):
+        args += ['--metadata', setting(env, 'SOFA_METADATA')]
     if setting(env, 'SOFA_BOOT_SCREEN', 'yes') in ('0', 'no', 'false'):
         args.append('--no-boot-screen')
     return args

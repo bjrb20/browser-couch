@@ -27,6 +27,7 @@ from emulator import Emulator
 from fetch_core import core_filename
 from inputs import InputHub
 from library import Library
+import metadata
 from media import GameAudio, GameVideo
 from session import Launcher, Session
 from systems import PROFILES
@@ -86,10 +87,12 @@ def host_ice_servers(servers):
 
 class Room:
     def __init__(self, session, pin, ice_servers=None, udp_ports=None, library=None, launcher=None,
-                 admin_pin=None, covers=None):
+                 admin_pin=None, covers=None, providers=(), http=None):
         self.udp_ports = udp_ports
         self.covers = covers
         self.cover_lock = asyncio.Lock()
+        self.fetcher = metadata.Fetcher(covers, list(providers), http or metadata.Http(), self.cover_lock) \
+            if covers and covers.root and providers else None
         self.library = library
         self.launcher = launcher
         self.admin_pin = admin_pin
@@ -171,19 +174,39 @@ class Room:
         if not self.library:
             return web.json_response(dict(consoles=[]))
         async with self.scan_lock:
-            if self.scanned_at is None or time.monotonic()-self.scanned_at > 10:
-                await asyncio.to_thread(self.library.scan)
-                self.scanned_at = time.monotonic()
+            await self.rescan()
             listing = await asyncio.to_thread(self.with_covers, self.library.public())
         return web.json_response(dict(listing, bootScreen=bool(self.launcher and self.launcher.boot_screen),
-                                      covers=bool(self.covers and self.covers.root)))
+                                      covers=bool(self.covers and self.covers.root),
+                                      metadata=bool(self.fetcher)))
+
+    async def rescan(self):
+        """Scan the library at most every 10 seconds. The caller holds scan_lock."""
+        if self.scanned_at is None or time.monotonic()-self.scanned_at > 10:
+            await asyncio.to_thread(self.library.scan)
+            self.scanned_at = time.monotonic()
 
     def with_covers(self, listing):
-        """The listing with each game's cover version, or None, for the page's cache. No paths."""
+        """The listing with each game's cover version, or None, for the page's cache, and any fetched details.
+
+        No paths, and no provider names or notes except for players who may change covers.
+        """
         games = self.library.games
-        return dict(listing, consoles=[dict(console, games=[
-            dict(item, cover=self.covers.info(games[item['id']]) if self.covers and item['id'] in games else None)
-            for item in console['games']]) for console in listing['consoles']])
+
+        def item(entry):
+            game = games.get(entry['id'])
+            if not self.covers or not game:
+                return dict(entry, cover=None)
+            record = self.covers.record(game.id) or {}
+            about = record.get('about')
+            entry = dict(entry, cover=self.covers.info(game), about=about if isinstance(about, dict) and about else None)
+            if self.fetcher:
+                status = self.fetcher.status(game.id)
+                entry['fetch'] = dict(state=status['state'], note=status['note'] or record.get('note'),
+                                      fetched=bool(record))
+            return entry
+        return dict(listing, consoles=[dict(console, games=[item(entry) for entry in console['games']])
+                                       for console in listing['consoles']])
 
     def cover_game(self, game_id):
         game = self.library.games.get(game_id) if self.library and isinstance(game_id, str) else None
@@ -241,6 +264,22 @@ class Room:
         game = self.cover_game(body.get('id') if isinstance(body, dict) else None)
         await asyncio.to_thread(self.covers.remove, game.id)
         return web.json_response(dict(ok=True, cover=await asyncio.to_thread(self.covers.info, game)))
+
+    async def cover_fetch(self, request):
+        """Queue online art and details: {id} for one game, again if it has them, or {missing: true}."""
+        self.cover_admin(request)
+        if not self.fetcher:
+            raise web.HTTPNotFound(text='This host fetches no art: set SOFA_METADATA to turn it on')
+        body = await request.json()
+        if not isinstance(body, dict):
+            raise web.HTTPBadRequest(text='Invalid fetch request')
+        if body.get('missing') is True:
+            async with self.scan_lock:
+                await self.rescan()
+            games = await asyncio.to_thread(self.fetcher.missing, list(self.library.games.values()))
+        else:
+            games = [self.cover_game(body.get('id'))]
+        return web.json_response(dict(ok=True, queued=self.fetcher.request(games)))
 
     async def admin(self, request):
         """Unlock game picking for this player with the --admin-pin."""
@@ -492,6 +531,8 @@ class Room:
     async def stop(self, app):
         if self.cleaner:
             self.cleaner.cancel()
+        if self.fetcher:
+            await self.fetcher.close()
         await asyncio.gather(*(self.remove(token) for token in list(self.clients)))
         self.video.stop()
         self.audio.stop()
@@ -572,7 +613,7 @@ def make_app(room, trusted_proxies=()):
     for route, handler in [('join', room.join), ('offer', room.offer), ('claim', room.claim),
                            ('release', room.release), ('leave', room.leave), ('admin', room.admin),
                            ('game', room.pick), ('game/stop', room.unpick), ('cover', room.cover_upload),
-                           ('cover/remove', room.cover_remove)]:
+                           ('cover/remove', room.cover_remove), ('cover/fetch', room.cover_fetch)]:
         app.router.add_post('/api/' + route, handler)
     app.router.add_get('/api/state', room.state)
     app.router.add_get('/api/library', room.games)
@@ -602,6 +643,10 @@ def main():
     parser.add_argument('--saves', default=str(ROOT/'runtime/saves'))
     parser.add_argument('--covers', default=str(ROOT/'runtime/covers'),
                         help='Writable folder for the cover art players with the admin PIN upload')
+    parser.add_argument('--metadata', default=os.environ.get('SOFA_METADATA') or None, metavar='PROVIDER,...',
+                        help='Off by default. Online cover art and details for library games, fetched when an '
+                             'admin asks: libretro, screenscraper or both, in the order to try them '
+                             '(default: $SOFA_METADATA). ScreenScraper reads its credentials from the environment')
     parser.add_argument('--state', help='Optional host-side emulator snapshot to restore')
     parser.add_argument('--multitap', choices=PROFILES['ps1'].multitaps,
                         help='Default: port 1 on PS1; on PS2, port 1 for more than two players')
@@ -653,6 +698,10 @@ def main():
     if args.admin_pin is not None and len(args.admin_pin) < 4:
         parser.error('Use an admin PIN of at least four characters')
     library = Library(args.library, args.system, ROOT/'runtime/cores').scan() if args.library else None
+    http = metadata.Http()
+    providers, warnings = metadata.providers(args.metadata, http) if library else ([], [])
+    for warning in warnings:
+        print(f'Metadata: {warning}', flush=True)
     ice = json.loads(args.ice_config.read_text()) if args.ice_config else []
     logging.basicConfig(level=logging.WARNING)
     context = None
@@ -667,6 +716,8 @@ def main():
         print(f'Sofa Link host | {emulator.name} {emulator.version} | {emulator.renderer} video', flush=True)
     else:
         print('Sofa Link host | no game loaded', flush=True)
+    print(f"Metadata: {', '.join(provider.name for provider in providers)}, when an admin asks"
+          if providers else 'Metadata: off', flush=True)
     if library:
         for console in library.consoles:
             count = f"{len(console['games'])} games" if console['available'] else 'cannot run'
@@ -679,8 +730,8 @@ def main():
         session, pin, ice, args.udp_ports, library,
         Launcher(args.system, args.saves, ROOT/'runtime/cores', args.players, tuple(args.core_option),
                  args.boot_screen),
-        args.admin_pin, Covers(args.covers, args.library) if library else None), args.trusted_proxy), host=args.host, port=args.port,
-                ssl_context=context, access_log=None)
+        args.admin_pin, Covers(args.covers, args.library) if library else None, providers, http),
+        args.trusted_proxy), host=args.host, port=args.port, ssl_context=context, access_log=None)
 
 
 def start_disc(parser, args, profile, hub):

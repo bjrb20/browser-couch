@@ -345,8 +345,10 @@ A game's card shows its cover, from one of these, the first that exists:
 2. `cover.jpg`, `cover.jpeg` or `cover.png` in the game's own folder in the
    library, for example `DIR/ps1/Canyon Racer/cover.jpg`. A cover in a console
    folder itself would belong to every game there, so it is ignored.
+3. Art fetched online, only when the host turns that on (see "Online cover
+   art and details").
 
-Without either, the card shows the console and title. Removing an upload shows
+Without any of them, the card shows the console and title. Removing an upload shows
 the library cover again; the host never writes to the library.
 
 Uploads go in `--covers DIR` (default `runtime/covers/`; `/data/covers` in the
@@ -356,11 +358,78 @@ most 5 MB, recognised by their content, not their name. It decodes the image,
 applies its orientation, scales it to fit 600 × 900 pixels and saves it as a
 new JPEG with no metadata (no EXIF, location, camera, comment or colour
 profile). Library covers go through the same steps before a browser sees
-them. Each address may make 12 cover changes a minute. The host never
-downloads art itself.
+them. Each address may make 12 cover changes a minute. Unless the host turns
+on online art, it never downloads any.
 
 Covers are fetched with the room token and shown from memory, so only players
 in the room see them, and only by game id.
+
+### Online cover art and details
+
+Off by default. `--metadata` (in the container, `SOFA_METADATA`) names the
+providers to try, in order:
+
+| Provider | Gives | Needs |
+|---|---|---|
+| `libretro` | Box art from the [libretro-thumbnails](https://github.com/libretro-thumbnails) repositories: the box, else the title screen, else a screenshot | Nothing |
+| `screenscraper` | Box art, description, year, genre and number of players from [ScreenScraper](https://www.screenscraper.fr/) | Developer credentials and, for usable quotas, a user account |
+
+```sh
+./run.sh --library DIR --metadata libretro,screenscraper
+```
+
+Nothing is fetched until a player who may choose games asks. They get "Fetch
+art" on each card ("Fetch again" once it was looked up) and "Fetch art for
+all missing" above the grid, which queues every game with no cover that was
+never looked up. The host checks that right, as for uploads. Requests go out
+one at a time in the background and never hold up the page or a running game;
+the page shows the results as they arrive.
+
+- **What is sent.** libretro: the game's original folder or file name, as it
+  is on disk before the page drops its `(...)` and `[...]` tags, and its
+  console, in the file's URL. ScreenScraper: that name with its file
+  extension, a disc serial if the name has one in a tag (for example
+  `[SLUS-00001]`), the console, and the credentials. Nothing about the players
+  or this host, and no file hashes: hashing whole disc images would take too
+  long.
+- **Names.** libretro-thumbnails names its files after the No-Intro or Redump
+  name with ``& * / : ` < > ? \ |`` replaced by `_`. The host does the same, so
+  a library named that way matches. Other names usually do not.
+- **Cache.** What a provider returns is kept in `--covers DIR/fetched/` as
+  `<game id>.jpg` and `<game id>.json`, re-encoded like an upload. It is not
+  fetched again unless someone asks for that game. A game that a provider did
+  not know is remembered too, so "all missing" does not ask again. A failure
+  (no network, a quota) is not, and shows as a short note on the card.
+- **An upload always wins.** Fetched art is shown only when there is no
+  upload and no library cover, and fetching never changes either.
+- **Details.** The year and genre show on the card. A description adds an
+  "About" button that shows it with the number of players.
+
+**libretro-thumbnails.** No account or key. The repositories state no licence
+for the images: the art belongs to each game's developers and publishers.
+Keep it for your own library and do not publish it.
+
+**ScreenScraper.** Its API needs two sets of credentials: developer
+credentials (an id and password for the software, which ScreenScraper gives
+out on request on its forum) and a user account (free, at screenscraper.fr).
+Its terms allow the API only in free software, and it closes accounts that
+break them. Set them in the host's environment, never in a file in this
+repository:
+
+| Variable | Value |
+|---|---|
+| `SOFA_SCREENSCRAPER_DEVID` | Developer id. Required. |
+| `SOFA_SCREENSCRAPER_DEVPASSWORD` | Developer password. Required. |
+| `SOFA_SCREENSCRAPER_USER` | Your user name. Optional, but without an account ScreenScraper may refuse requests or allow very few. |
+| `SOFA_SCREENSCRAPER_PASSWORD` | Your password. |
+
+The host identifies itself as `SofaLink` (`softname`) and follows the limits
+each answer gives for the account: it sends one request at a time (the
+smallest thread limit) and spaces them to the per-minute limit. It stops
+until the next day at the daily quota or the daily limit of unknown games,
+slows down when told it is going too fast, and stops for the session if the
+API refuses the credentials or is closed. ScreenScraper sends its credentials
+in the request URL, over HTTPS; the host never logs them.
 
 ### Choose and switch games
 
@@ -574,8 +643,10 @@ the host in its environment and stay out of its log. `SOFA_GAMES` is the
 library folder, with one subfolder per console. `SOFA_BIOS` has the layout of
 `runtime/system`: PS1 BIOS files at the top and PS2 BIOS files in `pcsx2/bios/`.
 The host links them into its writable system folder, because the PS2 core
-writes its own files next to the BIOS. Saves, memory cards, uploaded covers
-and those files go in the `data` volume.
+writes its own files next to the BIOS. Saves, memory cards, uploaded covers,
+fetched art and those files go in the `data` volume. Online cover art stays off
+unless you set `SOFA_METADATA`; see "Online cover art and details" for it and
+the ScreenScraper variables.
 
 Ports published, TCP only:
 

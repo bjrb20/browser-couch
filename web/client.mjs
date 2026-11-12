@@ -57,7 +57,7 @@ function renderSlots(){
 }
 // With no game running, players stay connected and the screen asks for a console and game.
 // "Change game" opens the same list over a running game. Browsers only ever get titles, ids and covers.
-let pickerOpen=false,library=null,libraryAt=0,picking=false,pickerDrawn='',bootChosen=false,consoleFilter='all',coverFor=null;
+let pickerOpen=false,library=null,libraryAt=0,picking=false,pickerDrawn='',bootChosen=false,consoleFilter='all',coverFor=null,fetchPoll=null;
 const coverURLs=new Map(),coverQueue=[];let coverLoads=0;
 async function loadLibrary(force=false){if(force||!library||performance.now()-libraryAt>15000){libraryAt=performance.now();try{const fresh=await api('library');if(!bootChosen)$('boot-screen').checked=fresh.bootScreen;library=fresh;}catch(e){message(e.message);}}renderLibrary();}
 // Covers need the room token, which an <img src> cannot send: fetch them and show blob URLs, a few at a time.
@@ -85,6 +85,18 @@ function filterLibrary(){
   $('no-match').hidden=!total||shown>0;$('no-match').textContent=query?'No games match “'+$('game-search').value.trim()+'”.':'No games for this console.';
 }
 function placeholder(art,game,item){art.classList.add('placeholder');const c=document.createElement('b'),t=document.createElement('span');c.textContent=item.id.toUpperCase();t.textContent=game.title;art.replaceChildren(c,t);}
+// Details a metadata provider found: the year and genre on the card, the rest in the About panel.
+function aboutLine(about,players=false){return [about?.year,about?.genre,players&&about?.players?about.players+' players':null].filter(Boolean).join(' · ');}
+function showAbout(game){
+  const panel=$('game-about'),title=document.createElement('h3'),line=document.createElement('p'),text=document.createElement('p'),close=document.createElement('button');
+  title.textContent=game.title;line.className='about-line';line.textContent=aboutLine(game.about,true);text.textContent=game.about?.description||'';
+  close.type='button';close.textContent='Close';close.addEventListener('click',()=>{panel.hidden=true;document.querySelector(`#library .game[data-id="${game.id}"] .pick`)?.focus();});
+  panel.replaceChildren(title,...[line,text].filter(p=>p.textContent),close);panel.hidden=false;close.focus();
+}
+async function fetchArt(body,what){
+  try{const r=await api('cover/fetch',body);message(r.queued?'Fetching art for '+what+' in the background.':'Nothing to fetch: every game has a cover or was looked up already.');}catch(e){message(e.message);}
+  await loadLibrary(true);
+}
 function renderLibrary(){
   const host=roomState?.host,list=$('library'),busy=picking||Boolean(host?.loading),can=Boolean(roomState?.canPick);
   const drawn=JSON.stringify([library,host?.game,host?.loading,host?.error,can,busy,roomState?.adminPin]);if(drawn===pickerDrawn)return;pickerDrawn=drawn;
@@ -94,7 +106,7 @@ function renderLibrary(){
   $('boot-option').hidden=!can||!library?.consoles.some(c=>c.bootScreen);
   const consoles=library?.consoles||[],focusedId=list.contains(document.activeElement)?document.activeElement.closest('.game')?.dataset.id:null;
   if(!consoles.some(c=>c.id===consoleFilter))consoleFilter='all';
-  $('picker-tools').hidden=!consoles.some(c=>c.games.length);
+  $('picker-tools').hidden=!consoles.some(c=>c.games.length);$('fetch-missing').hidden=!(can&&library?.metadata);
   $('console-filter').hidden=consoles.length<2;$('console-filter').replaceChildren(...(consoles.length<2?[]:[{id:'all',name:'All'},...consoles]).map(c=>{
     const b=document.createElement('button');b.type='button';b.dataset.console=c.id;b.textContent=c.id==='all'?'All':c.id.toUpperCase();b.title=c.name;
     b.addEventListener('click',()=>{consoleFilter=c.id;filterLibrary();});return b;}));
@@ -110,15 +122,23 @@ function renderLibrary(){
       b.type='button';b.className='pick';b.disabled=!can||busy;b.setAttribute('aria-label',(playing?'Playing: ':'Play ')+game.title);
       art.className='art';art.dataset.art=game.id;art.setAttribute('aria-hidden','true');name.className='name';name.textContent=game.title;
       placeholder(art,game,item);b.append(art,name);
+      if(aboutLine(game.about)){const meta=document.createElement('span');meta.className='meta';meta.textContent=aboutLine(game.about);b.append(meta);}
       if(playing){const tag=document.createElement('em');tag.textContent='PLAYING';b.append(tag);}
       b.addEventListener('click',()=>pick(game,item));card.append(b);
+      if(game.about?.description){const about=document.createElement('button');about.type='button';about.className='about';about.textContent='About';
+        about.setAttribute('aria-label','About '+game.title);about.addEventListener('click',()=>showAbout(game));card.append(about);}
       if(can&&library.covers){
         const tools=document.createElement('div'),change=document.createElement('button');tools.className='cover-tools';
         change.type='button';change.textContent=game.cover?'Change cover':'Add cover';change.setAttribute('aria-label',change.textContent+' for '+game.title);
         change.addEventListener('click',()=>{coverFor=game;$('cover-file').value='';$('cover-file').click();});tools.append(change);
         if(game.cover?.uploaded){const remove=document.createElement('button');remove.type='button';remove.textContent='Remove';remove.setAttribute('aria-label','Remove the cover for '+game.title);
           remove.addEventListener('click',()=>removeCover(game));tools.append(remove);}
+        if(library.metadata){const fetching=Boolean(game.fetch?.state),get=document.createElement('button');get.type='button';get.disabled=fetching;
+          get.textContent=fetching?'Fetching…':game.fetch?.fetched?'Fetch again':'Fetch art';get.setAttribute('aria-label',get.textContent+' for '+game.title);
+          get.addEventListener('click',()=>fetchArt({id:game.id},game.title));tools.append(get);}
         card.append(tools);
+        // A quiet note when a lookup found nothing or failed: the card keeps its placeholder.
+        if(library.metadata&&game.fetch?.note&&!game.fetch.state){const note=document.createElement('p');note.className='fetch-note';note.textContent=game.fetch.note;card.append(note);}
       }
       games.append(card);
     }
@@ -127,6 +147,8 @@ function renderLibrary(){
   filterLibrary();
   for(const item of consoles)for(const game of item.games)if(game.cover)queueCover(game);  // now the cards are in the page
   if(focusedId)list.querySelector(`.game[data-id="${focusedId}"] .pick:enabled`)?.focus();
+  // While art is being fetched, look again every few seconds.
+  if(!fetchPoll&&consoles.some(c=>c.games.some(g=>g.fetch?.state)))fetchPoll=setTimeout(()=>{fetchPoll=null;if(token&&library&&!$('game-picker').hidden)void loadLibrary(true);},3000);
 }
 async function uploadCover(game,file){
   if(file.size>5*1024*1024){message('Use an image of at most 5 MB.');return;}
@@ -142,6 +164,7 @@ async function removeCover(game){
 }
 $('cover-file').addEventListener('change',()=>{const file=$('cover-file').files[0];if(file&&coverFor)void uploadCover(coverFor,file);coverFor=null;});
 $('game-search').addEventListener('input',filterLibrary);
+$('fetch-missing').addEventListener('click',()=>fetchArt({missing:true},'every game with no cover'));
 // Arrow keys and a gamepad's D-pad move between cards by position; Enter, Space or the pad's ✕ button picks.
 function pickerTargets(){return [...$('game-picker').querySelectorAll('button:enabled,input:not([type=checkbox]):not([hidden])')].filter(e=>e.offsetParent&&!e.closest('[hidden]'));}
 function moveFocus(dx,dy){

@@ -34,6 +34,12 @@ services:
       SOFA_TURN_PORT: ${SOFA_TURN_PORT:-3478}
       SOFA_TURN_NEW_PASSWORD: ${SOFA_TURN_NEW_PASSWORD:-}
       SOFA_BOOT_SCREEN: ${SOFA_BOOT_SCREEN:-yes}
+      # Off unless set: online cover art providers, for example libretro,screenscraper.
+      SOFA_METADATA: ${SOFA_METADATA:-}
+      SOFA_SCREENSCRAPER_DEVID: ${SOFA_SCREENSCRAPER_DEVID:-}
+      SOFA_SCREENSCRAPER_DEVPASSWORD: ${SOFA_SCREENSCRAPER_DEVPASSWORD:-}
+      SOFA_SCREENSCRAPER_USER: ${SOFA_SCREENSCRAPER_USER:-}
+      SOFA_SCREENSCRAPER_PASSWORD: ${SOFA_SCREENSCRAPER_PASSWORD:-}
       SOFA_HOST_IP: ${SOFA_SUBNET:-172.31.251}.2
       SOFA_RELAY_IP: ${SOFA_SUBNET:-172.31.251}.3
     volumes:
@@ -85,5 +91,5 @@ networks:
         - subnet: ${SOFA_SUBNET:-172.31.251}.0/29
 
 volumes:
-  data:  # saves, memory cards, uploaded cover art and the PS2 console's own files
+  data:  # saves, memory cards, uploaded and fetched cover art and the PS2 console's own files
   turn:  # the relay password and configuration

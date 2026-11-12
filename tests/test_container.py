@@ -108,6 +108,11 @@ class ContainerStartTests(unittest.TestCase):
         self.assertEqual(args[args.index('--ice-config')+1], '/turn/ice.json')
         self.assertIn('--no-boot-screen', args)
         self.assertEqual(args[args.index('--covers')+1], '/data/covers')
+        self.assertNotIn('--metadata', args)
+        args = start.command(dict(env, SOFA_METADATA='libretro,screenscraper', SOFA_SCREENSCRAPER_PASSWORD='user-secret'),
+                             None)
+        self.assertEqual(args[args.index('--metadata')+1], 'libretro,screenscraper')
+        self.assertNotIn('user-secret', ' '.join(args))
         self.assertNotIn('--trusted-proxy', start.command({}, None))
         self.assertNotIn('--ice-config', start.command({}, None))
 
