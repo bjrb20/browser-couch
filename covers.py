@@ -8,7 +8,8 @@ Three sources, checked in this order:
   other two, so a cover a person chose always wins.
 
 An admin's own description, year or genre is kept apart in edited/<game id>.json
-and wins over a provider's, which fetching never changes.
+and wins over a provider's, which fetching never changes. An admin's pick of
+which provider entry a game is (matched/<game id>.json) is kept the same way.
 
 Every image is decoded and re-encoded here before a browser sees it: JPEG,
 PNG or WebP by content, at most MAX_SIZE on each side, as a JPEG with no
@@ -175,6 +176,34 @@ class Covers:
         about = {key: found[key] for key in FIELDS if isinstance(found.get(key), str) and found[key]}
         edits = self.edits(game_id)
         return dict(about, **edits), sorted(edits)
+
+    def matches(self, game_id):
+        """An admin's picks of the entry a game matches, {provider: entry id, or 0 for none}."""
+        path = self.root/'matched'/f'{checked_id(game_id)}.json' if self.root else None
+        try:
+            picks = json.loads(path.read_text()) if path and path.is_file() else {}
+        except (OSError, ValueError):
+            return {}
+        return {key: value for key, value in picks.items() if isinstance(key, str) and type(value) is int and value >= 0} \
+            if isinstance(picks, dict) else {}
+
+    def save_match(self, game_id, provider, entry):
+        """Pick `provider`'s entry for the game (an id, or 0 for none), or None to match by name again.
+
+        What was fetched before is dropped, art included, so the next fetch starts clean.
+        Uploads and edits stay.
+        """
+        if not self.root:
+            raise OSError('No covers folder')
+        picks = dict(self.matches(game_id))
+        if entry is None:
+            picks.pop(provider, None)
+        else:
+            picks[provider] = entry
+        self._write(self.root/'matched'/f'{checked_id(game_id)}.json', json.dumps(picks).encode())
+        for suffix in ('.jpg', '.json'):
+            self.fetched(game_id, suffix).unlink(missing_ok=True)
+        self.records.pop(game_id, None)
 
     def sidecar(self, game):
         """cover.jpg or cover.png in the game's own folder, not one the console's games share."""

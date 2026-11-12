@@ -93,6 +93,32 @@ function showAbout(game){
   close.type='button';close.textContent='Close';close.addEventListener('click',()=>{panel.hidden=true;document.querySelector(`#library .game[data-id="${game.id}"] .pick`)?.focus();});
   panel.replaceChildren(title,...[line,text].filter(p=>p.textContent),close);panel.hidden=false;close.focus();
 }
+// Which provider entry a game is, for a provider that matches by name: the admin picks one when it is unsure, or fixes a wrong one.
+function showMatch(game){
+  const panel=$('game-about'),f=game.fetch||{},provider=library.matching,picked=f.picked?.[provider],title=document.createElement('h3'),now=document.createElement('p');
+  title.textContent='Match for '+game.title;now.className='about-line';
+  const label=m=>m.name+(m.year?' ('+m.year+')':'')+' · #'+m.id;
+  if(picked===0)now.textContent='Set to no match: nothing is fetched from '+provider.toUpperCase()+'.';
+  else if(f.match){now.textContent=(picked?'Chosen: ':'Matched: ')+label(f.match)+' ';
+    if(f.match.url){const a=document.createElement('a');a.href=f.match.url;a.target='_blank';a.rel='noopener noreferrer';a.textContent='View';now.append(a);}}
+  else now.textContent=f.candidates?.length?'Not sure which game this is. Choose one:':f.fetched?'No match found.':'Not looked up yet.';
+  const picks=document.createElement('div');picks.className='match-picks';
+  for(const c of f.candidates||[]){const b=document.createElement('button');b.type='button';b.textContent=label(c);b.addEventListener('click',()=>setMatch(game,c.id));picks.append(b);}
+  const form=document.createElement('form'),field=document.createElement('label'),input=document.createElement('input'),use=document.createElement('button');
+  form.className='match-form';field.textContent=provider.toUpperCase()+' game number';input.type='text';input.inputMode='numeric';input.pattern='[0-9]{1,9}';input.maxLength=9;input.required=true;input.autocomplete='off';
+  field.append(input);use.type='submit';use.textContent='Use this game';form.append(field,use);
+  form.addEventListener('submit',e=>{e.preventDefault();if(/^[1-9][0-9]{0,8}$/.test(input.value.trim()))void setMatch(game,Number(input.value.trim()));else message('Enter the number from the game’s '+provider.toUpperCase()+' page.');});
+  const actions=document.createElement('div'),none=document.createElement('button'),auto=document.createElement('button'),close=document.createElement('button');actions.className='match-picks';
+  none.type=auto.type=close.type='button';none.textContent='No match';auto.textContent='Match by name';close.textContent='Close';
+  none.addEventListener('click',()=>setMatch(game,0));auto.addEventListener('click',()=>setMatch(game,null));auto.hidden=picked===undefined;
+  close.addEventListener('click',()=>{panel.hidden=true;document.querySelector(`#library .game[data-id="${game.id}"] .pick`)?.focus();});
+  actions.append(none,auto,close);panel.replaceChildren(title,now,...(picks.children.length?[picks]:[]),form,actions);panel.hidden=false;(picks.querySelector('button')||input).focus();
+}
+async function setMatch(game,entry){
+  try{await api('game/match',{id:game.id,provider:library.matching,entry});$('game-about').hidden=true;
+    message(entry===0?'No match for '+game.title+': its fetched details are cleared.':'Fetching '+game.title+' again with the new match.');}catch(e){message(e.message);}
+  await loadLibrary(true);
+}
 async function fetchArt(body,what){
   try{const r=await api('cover/fetch',body);message(r.queued?'Fetching art for '+what+' in the background.':'Nothing to fetch: every game has a cover or was looked up already.');}catch(e){message(e.message);}
   await loadLibrary(true);
@@ -136,6 +162,8 @@ function renderLibrary(){
         if(library.metadata){const fetching=Boolean(game.fetch?.state),get=document.createElement('button');get.type='button';get.disabled=fetching;
           get.textContent=fetching?'Fetching…':game.fetch?.fetched?'Fetch again':'Fetch art';get.setAttribute('aria-label',get.textContent+' for '+game.title);
           get.addEventListener('click',()=>fetchArt({id:game.id},game.title));tools.append(get);}
+        if(library.matching){const fix=document.createElement('button');fix.type='button';fix.disabled=Boolean(game.fetch?.state);fix.textContent='Match';
+          fix.setAttribute('aria-label','Choose the match for '+game.title);fix.addEventListener('click',()=>showMatch(game));tools.append(fix);}
         card.append(tools);
         // A quiet note when a lookup found nothing or failed: the card keeps its placeholder.
         if(library.metadata&&game.fetch?.note&&!game.fetch.state){const note=document.createElement('p');note.className='fetch-note';note.textContent=game.fetch.note;card.append(note);}

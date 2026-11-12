@@ -13,7 +13,7 @@ from covers import Covers
 from inputs import InputHub
 from library import Game, Library
 import metadata
-from metadata import Fetcher, Libretro, ProviderError, ScreenScraper, libretro_name, loose_name, serial
+from metadata import Fetcher, Igdb, Libretro, ProviderError, ScreenScraper, libretro_name, loose_name, serial
 from server import Room, make_app
 from session import Session
 
@@ -22,6 +22,7 @@ from test_library import Host
 
 DEV = dict(SOFA_SCREENSCRAPER_DEVID='dev-id', SOFA_SCREENSCRAPER_DEVPASSWORD='dev-secret',
            SOFA_SCREENSCRAPER_USER='player', SOFA_SCREENSCRAPER_PASSWORD='user-secret')
+TWITCH = dict(SOFA_IGDB_CLIENT_ID='client-id', SOFA_IGDB_CLIENT_SECRET='client-secret')
 
 
 class FakeHttp:
@@ -30,6 +31,7 @@ class FakeHttp:
     def __init__(self, *rules):
         self.rules = list(rules)
         self.requests = []
+        self.posts = []
         self.closed = False
 
     async def get(self, url, params=None, limit=metadata.MAX_DOWNLOAD):
@@ -39,6 +41,17 @@ class FakeHttp:
                 if isinstance(status, Exception):
                     raise status
                 return status, body
+        return 404, b''
+
+    async def post(self, url, data, headers=None, limit=metadata.MAX_DOWNLOAD):
+        """Rules match the URL followed by the body, so a rule can name the search."""
+        self.posts.append((url, data, dict(headers or {})))
+        text = data.decode() if isinstance(data, bytes) else json.dumps(data)
+        for match, status, body in self.rules:
+            if match in url+' '+text:
+                if isinstance(status, Exception):
+                    raise status
+                return (status(text) if callable(status) else status), body
         return 404, b''
 
     async def close(self):
@@ -95,6 +108,11 @@ class NameTests(TestCase):
         self.assertIn('SOFA_SCREENSCRAPER_DEVID', warnings[0])
         chosen, _ = metadata.providers('screenscraper,libretro', http, DEV)
         self.assertEqual([provider.name for provider in chosen], ['screenscraper', 'libretro'])
+        chosen, warnings = metadata.providers('libretro,igdb', http, {})
+        self.assertEqual(([provider.name for provider in chosen], warnings),
+                         (['libretro'], ['IGDB needs SOFA_IGDB_CLIENT_ID and SOFA_IGDB_CLIENT_SECRET']))
+        chosen, _ = metadata.providers('libretro,igdb', http, TWITCH)
+        self.assertEqual([provider.name for provider in chosen], ['libretro', 'igdb'])
 
 
 class LibretroTests(IsolatedAsyncioTestCase):
@@ -246,6 +264,149 @@ class ScreenScraperTests(IsolatedAsyncioTestCase):
         self.assertIsNone(ScreenScraper.from_env(FakeHttp(), dict(SOFA_SCREENSCRAPER_USER='player')))
 
 
+TOKEN = ('id.twitch.tv', 200, json.dumps(dict(access_token='the-token', expires_in=5_000_000, token_type='bearer')).encode())
+
+
+def entry(id, name, **extra):
+    """One IGDB game as its API returns it, with every field the host asks for."""
+    return dict(dict(
+        id=id, name=name, game_type=dict(id=1, type='Main Game'), first_release_date=901_843_200,  # 1998-07-31
+        summary='A  racing\ngame on made-up roads.', cover=dict(id=5, image_id='co1abc'),
+        genres=[dict(id=1, name='Racing'), dict(id=2, name='Arcade'), dict(id=3, name='Sport')],
+        game_modes=[dict(id=1, name='Single player'), dict(id=2, name='Multiplayer')],
+        multiplayer_modes=[dict(id=1, platform=7, offlinemax=4), dict(id=2, platform=8, offlinemax=2)],
+        involved_companies=[dict(id=1, company=dict(id=1, name='Made Up Soft'), publisher=True),
+                            dict(id=2, company=dict(id=2, name='Pretend Studio'), publisher=False)],
+        platforms=[7], url=f'https://www.igdb.com/games/game-{id}'), **extra)
+
+
+def igdb(*rules, env=TWITCH):
+    http = FakeHttp(*rules, TOKEN, ('images.igdb.com', 200, b'jpeg'), ('api.igdb.com', 200, b'[]'))
+    return quick(Igdb.from_env(http, env)), http
+
+
+def games(*entries):
+    return json.dumps(list(entries)).encode()
+
+
+class IgdbTests(IsolatedAsyncioTestCase):
+    async def test_signs_in_once_and_keeps_the_secret_out_of_urls(self):
+        provider, http = igdb(('search "Canyon Racer"', 200, games(entry(11, 'Canyon Racer'))))
+        found = await provider.lookup(game('Canyon Racer (Europe) [SLES-00001]'))
+        await provider.lookup(game('Canyon Racer (Europe)'))
+        token_posts = [post for post in http.posts if 'twitch' in post[0]]
+        self.assertEqual(len(token_posts), 1)
+        url, data, _ = token_posts[0]
+        self.assertEqual(url, 'https://id.twitch.tv/oauth2/token')  # the secret goes in the body, not the URL
+        self.assertEqual(data, dict(client_id='client-id', client_secret='client-secret', grant_type='client_credentials'))
+        url, body, headers = http.posts[1]
+        self.assertEqual(url, 'https://api.igdb.com/v4/games')
+        self.assertEqual(headers, {'Client-ID': 'client-id', 'Authorization': 'Bearer the-token', 'Accept': 'application/json'})
+        # The clean title only, on its own console.
+        self.assertTrue(body.decode().startswith('search "Canyon Racer"; fields '))
+        self.assertIn('where platforms = (7);', body.decode())
+        self.assertNotIn('secret', repr(provider))
+        self.assertEqual(found.art, b'jpeg')
+        self.assertEqual(http.requests[0][0], 'https://images.igdb.com/igdb/image/upload/t_cover_big_2x/co1abc.jpg')
+        self.assertEqual(found.match, dict(id=11, name='Canyon Racer', year='1998', url='https://www.igdb.com/games/game-11'))
+
+    async def test_details_from_the_entry(self):
+        provider, _ = igdb(('games', 200, games(entry(11, 'Canyon Racer'))))
+        found = await provider.lookup(game('Canyon Racer', console='ps1'))
+        self.assertEqual(found.about, dict(description='A racing game on made-up roads.', year='1998',
+                                           genre='Racing, Arcade', publisher='Made Up Soft', players='1-4'))
+        found = await provider.lookup(game('Canyon Racer', console='ps2'), art=False)
+        self.assertEqual(found.about['players'], '1-2')  # the console's own multiplayer modes
+        self.assertIsNone(found.art)
+        bare = entry(11, 'Canyon Racer', multiplayer_modes=[], game_modes=[dict(id=1, name='Single player')],
+                     summary=None, genres=[], involved_companies=[], first_release_date=None, cover=None)
+        provider, _ = igdb(('games', 200, games(bare)))
+        found = await provider.lookup(game('Canyon Racer'))
+        self.assertEqual((found.about, found.art), (dict(players='1'), None))
+
+    async def test_matches_a_colon_an_alternative_name_or_a_series_prefix(self):
+        provider, http = igdb(('search "Sky Ball Z: Densetsu"', 200, games(
+            entry(21, 'Sky Ball Z: The Legend', alternative_names=[dict(id=1, name='Sky Ball Z: Densetsu')]))))
+        found = await provider.lookup(game('Sky Ball Z - Densetsu (Japan)'))
+        self.assertEqual(found.match['id'], 21)
+        # A spaced romanisation still matches the joined one, as letters only.
+        provider, _ = igdb(('search "Sky Ball Z - Den Setsu"', 200, games(
+            entry(21, 'Sky Ball Z: The Legend', alternative_names=[dict(id=1, name='Sky Ball Z: Densetsu')]))))
+        self.assertEqual((await provider.lookup(game('Sky Ball Z - Den Setsu (Japan)'))).match['id'], 21)
+        provider, _ = igdb(('games', 200, games(entry(31, 'Jack Hawk 042: Night Agent'))))
+        self.assertEqual((await provider.lookup(game('042 - Night Agent (USA)'))).match['id'], 31)
+
+    async def test_tries_the_subtitle_when_the_full_name_finds_nothing(self):
+        provider, http = igdb(('search "Den Setsu"', 200, games(
+            entry(21, 'Sky Ball Z: The Legend', alternative_names=[dict(id=1, name='Sky Ball Z: Den Setsu')]))))
+        found = await provider.lookup(game('Sky Ball Z - Den Setsu (Japan)'))
+        self.assertEqual(found.match['id'], 21)
+        searches = [post[1].decode().split(';')[0] for post in http.posts if post[0].endswith('/games')]
+        self.assertEqual(searches, ['search "Sky Ball Z - Den Setsu"', 'search "Sky Ball Z: Den Setsu"', 'search "Den Setsu"'])
+
+    async def test_shows_nothing_rather_than_a_wrong_match(self):
+        provider, _ = igdb(('games', 200, games(entry(41, 'Canyon Racer 2'), entry(42, 'Super Canyon Racer Deluxe'),
+                                                entry(43, 'Racer'))))
+        found = await provider.lookup(game('Canyon Racer (USA)'))
+        self.assertIsNone(found.match)
+        self.assertEqual((found.art, found.about), (None, {}))
+        self.assertEqual([item['id'] for item in found.candidates], [41, 42, 43])
+        # A short name inside a longer one is not enough either.
+        provider, _ = igdb(('games', 200, games(entry(44, 'The Big Racer'))))
+        self.assertIsNone((await provider.lookup(game('Racer'))).match)
+        provider, _ = igdb()
+        self.assertIsNone(await provider.lookup(game('Racer')))
+        self.assertIsNone(await provider.lookup(game('Racer', console='other')))
+
+    async def test_two_of_the_same_name_take_the_main_game_or_ask(self):
+        edition = entry(52, 'Canyon Racer', game_type=dict(id=2, type='Port'), version_parent=51)
+        provider, _ = igdb(('games', 200, games(edition, entry(51, 'Canyon Racer'))))
+        self.assertEqual((await provider.lookup(game('Canyon Racer'))).match['id'], 51)
+        provider, _ = igdb(('games', 200, games(entry(51, 'Canyon Racer'), entry(53, 'Canyon Racer'))))
+        found = await provider.lookup(game('Canyon Racer'))
+        self.assertIsNone(found.match)
+        self.assertEqual([item['id'] for item in found.candidates], [51, 53])
+
+    async def test_an_admin_pick_is_fetched_by_id(self):
+        provider, http = igdb(('where id = 77;', 200, games(entry(77, 'Something Else Entirely', platforms=[32]))))
+        found = await provider.lookup(game('Canyon Racer'), choice=77)
+        self.assertEqual(found.match['id'], 77)
+        self.assertNotIn('search', str(http.posts))
+        provider, http = igdb()
+        self.assertIsNone(await provider.lookup(game('Canyon Racer'), choice=0))
+        self.assertEqual(http.posts, [])  # "no match" asks nothing at all
+
+    async def test_only_igdb_image_ids_and_links(self):
+        provider, http = igdb(('games', 200, games(entry(11, 'Canyon Racer', cover=dict(image_id='../x?y'),
+                                                         url='https://elsewhere.example/games/1'))))
+        found = await provider.lookup(game('Canyon Racer'))
+        self.assertEqual((found.art, found.match['url'], http.requests), (None, None, []))
+
+    async def test_errors(self):
+        provider, _ = igdb(('id.twitch.tv', 403, b'{"message":"invalid client secret"}'))
+        with self.assertRaises(ProviderError) as caught:
+            await provider.lookup(game('Canyon Racer'))
+        self.assertTrue(caught.exception.stop)
+        self.assertNotIn('client-secret', str(caught.exception))
+        provider, http = igdb(('api.igdb.com', 429, b''))
+        with self.assertRaisesRegex(ProviderError, 'busy'):
+            await provider.lookup(game('Canyon Racer'))
+        self.assertEqual(len([post for post in http.posts if 'igdb.com' in post[0]]), 3)
+        self.assertFalse(provider.stopped)
+        provider, _ = igdb(('api.igdb.com', 500, b''))
+        with self.assertRaisesRegex(ProviderError, 'IGDB answered 500'):
+            await provider.lookup(game('Canyon Racer'))
+        provider, _ = igdb(('api.igdb.com', 200, b'<html>'))
+        with self.assertRaisesRegex(ProviderError, 'could not read'):
+            await provider.lookup(game('Canyon Racer'))
+
+    async def test_signs_in_again_when_the_token_is_refused(self):
+        answers = iter([401, 200])
+        provider, http = igdb(('api.igdb.com', lambda body: next(answers), games(entry(11, 'Canyon Racer'))))
+        self.assertEqual((await provider.lookup(game('Canyon Racer'))).match['id'], 11)
+        self.assertEqual(len([post for post in http.posts if 'twitch' in post[0]]), 2)
+
+
 class FetcherTests(IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.temporary = tempfile.TemporaryDirectory()
@@ -296,6 +457,40 @@ class FetcherTests(IsolatedAsyncioTestCase):
         self.assertIsNone(self.covers.record(self.game.id))
         self.assertEqual(fetcher.status(self.game.id)['note'], 'Could not reach a host')
         self.assertEqual(fetcher.missing([self.game]), [self.game])
+
+    async def test_unsure_matches_keep_candidates_and_show_nothing(self):
+        provider, _ = igdb(('games', 200, games(entry(41, 'Puzzle Quest 2'), entry(42, 'Puzzle Quest Deluxe'))))
+        fetcher = await self.run_fetch(provider)
+        record = self.covers.record(self.game.id)
+        self.assertEqual((record['about'], record['match']), ({}, None))
+        self.assertEqual([(item['id'], item['provider']) for item in record['candidates']], [(41, 'igdb'), (42, 'igdb')])
+        self.assertEqual(record['note'], 'Not sure which game this is: choose the match')
+        self.assertIsNone(self.covers.info(self.game))
+        self.assertEqual(fetcher.missing([self.game]), [])
+
+    async def test_libretro_art_and_igdb_details_with_the_admin_pick(self):
+        art = FakeHttp(('Named_Boxarts', 200, image(kind='PNG')))
+        provider, http = igdb(('where id = 9;', 200, games(entry(9, 'Puzzle Quest: The Return'))))
+        self.covers.save_match(self.game.id, 'igdb', 9)
+        await self.run_fetch(Libretro(art), provider)
+        record = self.covers.record(self.game.id)
+        self.assertEqual(record['sources'], ['libretro', 'igdb'])
+        self.assertEqual(record['match']['id'], 9)
+        self.assertEqual(record['about']['publisher'], 'Made Up Soft')
+        self.assertEqual(http.requests, [])  # libretro had the art: no IGDB image
+
+    async def test_a_new_match_drops_fetched_art_but_never_uploads_or_edits(self):
+        await self.run_fetch(Libretro(FakeHttp(('Named_Boxarts', 200, image(kind='PNG')))))
+        uploaded = image(kind='JPEG', colour=(1, 2, 3))
+        self.covers.save(self.game.id, uploaded)
+        self.covers.save_edits(self.game.id, dict(genre='Mine'))
+        self.covers.save_match(self.game.id, 'igdb', 0)
+        self.assertFalse(self.covers.fetched(self.game.id).exists())
+        self.assertIsNone(self.covers.record(self.game.id))
+        self.assertEqual((self.covers.read(self.game), self.covers.about(self.game.id)), (uploaded, (dict(genre='Mine'), ['genre'])))
+        self.assertEqual(self.covers.matches(self.game.id), dict(igdb=0))
+        self.covers.save_match(self.game.id, 'igdb', None)
+        self.assertEqual(self.covers.matches(self.game.id), {})
 
     async def test_a_bad_image_keeps_the_placeholder(self):
         fetcher = await self.run_fetch(Libretro(FakeHttp(('Named_Boxarts', 200, b'<svg/>'))))
@@ -383,3 +578,42 @@ class FetchApiTests(IsolatedAsyncioTestCase):
         self.assertEqual((await self.client.post('/api/cover/fetch', json=dict(id='0'*16), headers=admin)).status, 404)
         await self.client.close()
         self.assertTrue(self.http.closed)
+
+
+    async def test_admin_picks_the_match_and_players_never_see_candidates(self):
+        provider, http = igdb(('search "Puzzle Quest"', 200, games(entry(41, 'Puzzle Quest 2'), entry(42, 'Puzzle Quest III'))),
+                              ('where id = 42;', 200, games(entry(42, 'Puzzle Quest III'))),
+                              ('images.igdb.com', 200, image(kind='JPEG')))
+        await self.start([provider])
+        player, admin = await self.join(), await self.join(admin=True)
+        puzzle = (await self.games(admin))[0]['Puzzle Quest']
+        await self.client.post('/api/cover/fetch', json=dict(id=puzzle['id']), headers=admin)
+        await self.room.fetcher.task
+        games_, body = await self.games(admin)
+        self.assertEqual(body['matching'], 'igdb')
+        fetch = games_['Puzzle Quest']['fetch']
+        self.assertEqual(([item['id'] for item in fetch['candidates']], fetch['match'], fetch['picked']), ([41, 42], None, {}))
+        self.assertNotIn('candidates', (await self.games(player))[0]['Puzzle Quest']['fetch'])
+
+        def pick(auth, **body):
+            return self.client.post('/api/game/match', json=dict(dict(id=puzzle['id'], provider='igdb'), **body), headers=auth)
+        self.assertEqual((await pick(player, entry=42)).status, 403)
+        for bad in ('42', -1, 1.5, True, 2**31):
+            self.assertEqual((await pick(admin, entry=bad)).status, 400, bad)
+        self.assertEqual((await pick(admin, entry=42, provider='libretro')).status, 404)
+        self.assertEqual(await (await pick(admin, entry=42)).json(), dict(ok=True, queued=1))
+        await self.room.fetcher.task
+        fetch = (await self.games(admin))[0]['Puzzle Quest']['fetch']
+        self.assertEqual((fetch['match']['id'], fetch['candidates'], fetch['picked']), (42, [], dict(igdb=42)))
+        self.assertTrue((await self.games(player))[0]['Puzzle Quest']['cover']['fetched'])
+        # No match: what was fetched goes, and nothing is asked again.
+        asked = len(http.posts)
+        self.assertEqual((await pick(admin, entry=0)).status, 200)
+        await self.room.fetcher.task
+        puzzle = (await self.games(admin))[0]['Puzzle Quest']
+        self.assertEqual((puzzle['cover'], puzzle['about'], puzzle['fetch']['picked']), (None, None, dict(igdb=0)))
+        self.assertEqual(len(http.posts), asked)
+        # Back to matching by name.
+        self.assertEqual((await pick(admin, entry=None)).status, 200)
+        await self.room.fetcher.task
+        self.assertEqual((await self.games(admin))[0]['Puzzle Quest']['fetch']['picked'], {})

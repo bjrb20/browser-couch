@@ -5,11 +5,15 @@
   original file or folder name. No account.
 - screenscraper: box art, description, year, genre and players from
   ScreenScraper. Needs its developer and user credentials in the environment.
+- igdb: box art, description, year, genre, players and publisher from IGDB,
+  matched by name and console. Needs a Twitch client id and secret in the
+  environment.
 
 Nothing is fetched until an admin asks, per game or for every game with no
 cover and no earlier attempt. Requests go out one at a time in the
 background, paced to each provider's limits. Only the game's name, its serial
-and its console are sent: nothing about the players or this host.
+and its console are sent (and a provider's own credentials): nothing about
+the players or this host.
 What a provider returns is cached in the covers folder by game id and
 fetched again only when an admin asks for that game.
 """
@@ -26,6 +30,7 @@ import unicodedata
 from urllib.parse import quote, urlsplit
 
 import covers as cover_art
+from library import clean_title
 
 log = logging.getLogger('metadata')
 
@@ -51,6 +56,8 @@ class ProviderError(Exception):
 class Found:
     art: bytes = None  # the image as downloaded; the caller re-encodes it
     about: dict = field(default_factory=dict)  # any of FIELDS, as text
+    match: dict = None  # the provider's own entry, {id, name, year, url}, where it matches by name
+    candidates: list = field(default_factory=list)  # entries it was unsure between, for an admin to pick from
 
 
 class Http:
@@ -78,6 +85,24 @@ class Http:
             # The exception text can hold the URL, and ScreenScraper's URLs hold credentials.
             raise ProviderError(f'Could not reach {urlsplit(url).hostname}') from None
 
+    async def post(self, url, data, headers=None, limit=MAX_DOWNLOAD):
+        """POST `data` (a dict as a form, or text) and return (status, body), like get()."""
+        import aiohttp
+        if not self.session:
+            self.session = aiohttp.ClientSession(headers={'User-Agent': AGENT},
+                                                 timeout=aiohttp.ClientTimeout(total=self.timeout))
+        try:
+            async with self.session.post(url, data=data, headers=headers, allow_redirects=False) as response:
+                body = bytearray()
+                async for chunk in response.content.iter_chunked(64*1024):
+                    body += chunk
+                    if len(body) > limit:
+                        raise ProviderError('The answer was too large')
+                return response.status, bytes(body)
+        except (aiohttp.ClientError, asyncio.TimeoutError, OSError):
+            # Credentials travel in the body and headers: say only which host failed.
+            raise ProviderError(f'Could not reach {urlsplit(url).hostname}') from None
+
     async def close(self):
         if self.session:
             await self.session.close()
@@ -99,13 +124,18 @@ class Provider:
             await asyncio.sleep(wait)
         self.last = time.monotonic()
 
+    matches = False  # True for a provider that matches by name and lets an admin pick its entry
+
     def available(self):
         if self.stopped and self.stopped[1] and time.time() >= self.stopped[1]:
             self.stopped = None
         return not self.stopped
 
-    async def lookup(self, game, art=True):
-        """A Found, or None when the provider has nothing for this game."""
+    async def lookup(self, game, art=True, choice=None):
+        """A Found, or None when the provider has nothing for this game.
+
+        `choice` is an admin's pick for a provider that `matches`: its entry id, or 0 for none.
+        """
         raise NotImplementedError
 
 
@@ -190,7 +220,7 @@ class Libretro(Provider):
             names.append(bare)
         return names
 
-    async def lookup(self, game, art=True):
+    async def lookup(self, game, art=True, choice=None):
         system = self.SYSTEMS.get(game.console)
         if not system or not art:
             return None
@@ -222,6 +252,14 @@ def tomorrow():
     """ScreenScraper's daily quotas: wait until the next UTC midnight."""
     now = datetime.datetime.now(datetime.timezone.utc)
     return (now+datetime.timedelta(days=1)).replace(hour=0, minute=5, second=0, microsecond=0).timestamp()
+
+
+def short_text(text):
+    """A description on one line, cut at a word to MAX_TEXT characters, or None."""
+    if not isinstance(text, str) or not text.strip():
+        return None
+    text = ' '.join(text.split())
+    return text if len(text) <= MAX_TEXT else text[:MAX_TEXT].rsplit(' ', 1)[0]+'…'
 
 
 def pick_text(items, key='text'):
@@ -301,7 +339,7 @@ class ScreenScraper(Provider):
             raise ProviderError(message, stop, tomorrow() if status in (430, 431) else None)
         return status, body
 
-    async def lookup(self, game, art=True):
+    async def lookup(self, game, art=True, choice=None):
         system = self.SYSTEMS.get(game.console)
         if not system:
             return None
@@ -333,10 +371,9 @@ class ScreenScraper(Provider):
 
     def about(self, jeu):
         about = {}
-        text = pick_text(jeu.get('synopsis'))
+        text = short_text(pick_text(jeu.get('synopsis')))
         if text:
-            text = ' '.join(text.split())
-            about['description'] = text if len(text) <= MAX_TEXT else text[:MAX_TEXT].rsplit(' ', 1)[0]+'…'
+            about['description'] = text
         dates = [item.get('text', '') for item in jeu.get('dates') or [] if isinstance(item, dict)]
         years = sorted(match[0] for match in (re.match(r'(19|20)\d\d', str(date)) for date in dates) if match)
         if years:
@@ -371,7 +408,226 @@ class ScreenScraper(Provider):
         return None
 
 
-PROVIDERS = ('libretro', 'screenscraper')
+class Igdb(Provider):
+    """IGDB, through Twitch's client-credentials sign-in. Free for non-commercial use under Twitch's terms.
+
+    Matches by the game's clean title on its console and takes only a match it is sure of:
+    the same name, or an alternative name, once spacing, punctuation, case and accents are
+    dropped, or the same name with a prefix such as a series name. Otherwise it keeps up to
+    five candidates for an admin to choose from, and shows nothing.
+    """
+    name = 'igdb'
+    matches = True
+    interval = 0.3  # IGDB allows 4 requests a second; one at a time stays well under its 8 open requests
+    TOKEN = 'https://id.twitch.tv/oauth2/token'
+    BASE = 'https://api.igdb.com/v4/'
+    IMAGE = 'https://images.igdb.com/igdb/image/upload/t_cover_big_2x/{}.jpg'
+    PLATFORMS = {'ps1': 7, 'ps2': 8}
+    FIELDS = ('name,alternative_names.name,game_type.type,version_parent,first_release_date,summary,'
+              'cover.image_id,genres.name,game_modes.name,multiplayer_modes.platform,'
+              'multiplayer_modes.offlinemax,multiplayer_modes.offlinecoopmax,'
+              'involved_companies.company.name,involved_companies.publisher,platforms,url')
+    IMAGE_ID = re.compile(r'[a-z0-9]{1,40}')
+
+    def __init__(self, http, client_id, client_secret):
+        super().__init__(http)
+        self.client_id = client_id
+        self.client_secret = client_secret
+        self.token = None
+        self.token_until = 0
+
+    def __repr__(self):
+        return '<Igdb>'  # never the secret or the token
+
+    @classmethod
+    def from_env(cls, http, env=os.environ):
+        client_id, client_secret = env.get('SOFA_IGDB_CLIENT_ID'), env.get('SOFA_IGDB_CLIENT_SECRET')
+        if not client_id or not client_secret:
+            return None
+        return cls(http, client_id.strip(), client_secret.strip())
+
+    async def sign_in(self):
+        """An access token, kept until a minute before it expires (about two months)."""
+        if self.token and time.monotonic() < self.token_until:
+            return self.token
+        await self.pace()
+        status, body = await self.http.post(self.TOKEN, dict(client_id=self.client_id, client_secret=self.client_secret,
+                                                             grant_type='client_credentials'), limit=64*1024)
+        if status in (400, 401, 403):
+            raise ProviderError('Twitch refused the IGDB client id or secret', stop=True)
+        if status != 200:
+            raise ProviderError(f'Twitch sign-in answered {status}: try again later')
+        try:
+            answer = json.loads(body)
+            token, expires = answer['access_token'], int(answer.get('expires_in', 3600))
+        except (ValueError, KeyError, TypeError):
+            raise ProviderError('Twitch sent a sign-in answer this host could not read') from None
+        if not isinstance(token, str) or not token:
+            raise ProviderError('Twitch sent a sign-in answer this host could not read')
+        self.token, self.token_until = token, time.monotonic()+max(expires-60, 60)
+        return token
+
+    async def query(self, endpoint, body, retries=2):
+        """A list of results from one Apicalypse query."""
+        for attempt in range(retries+1):
+            token = await self.sign_in()
+            await self.pace()
+            status, answer = await self.http.post(
+                self.BASE+endpoint, body.encode(), limit=2*1024*1024,
+                headers={'Client-ID': self.client_id, 'Authorization': 'Bearer '+token, 'Accept': 'application/json'})
+            if status == 401 and attempt < retries:
+                self.token = None  # revoked or expired early: sign in again
+                continue
+            if status == 429 and attempt < retries:
+                self.interval = min(self.interval*2, 10)
+                continue
+            break
+        if status in (401, 403):
+            raise ProviderError('IGDB refused the client id or token', stop=True)
+        if status == 429:
+            raise ProviderError('IGDB is busy: try again later')
+        if status != 200:
+            raise ProviderError(f'IGDB answered {status}')
+        try:
+            results = json.loads(answer)
+        except ValueError:
+            raise ProviderError('IGDB sent an answer this host could not read') from None
+        return [item for item in results if isinstance(item, dict) and isinstance(item.get('id'), int)] \
+            if isinstance(results, list) else []
+
+    @staticmethod
+    def searches(title):
+        """What to search for: the clean title, with a colon for " - ", then its subtitle alone."""
+        title = re.sub(r'["\\]', '', title).strip()
+        names = [title, title.replace(' - ', ': ')]
+        if ' - ' in title:
+            names.append(title.rsplit(' - ', 1)[1])
+        return list(dict.fromkeys(name for name in names if name))
+
+    @staticmethod
+    def names(entry):
+        names = [entry.get('name')]+[alt.get('name') for alt in entry.get('alternative_names') or []
+                                     if isinstance(alt, dict)]
+        return [loose_name(name) for name in names if isinstance(name, str) and name.strip()]
+
+    @classmethod
+    def sureness(cls, title, entry):
+        """2 for the same name, 1 for the same name after a prefix (a series name), else 0."""
+        wanted = loose_name(title)
+        if not wanted:
+            return 0
+        names = cls.names(entry)
+        if wanted in names:
+            return 2
+        # "007 - Agent Under Fire" is "James Bond 007: Agent Under Fire". A name that only
+        # starts the same ("Racer" and "Racer 2") is a different game.
+        if any(name.endswith(wanted) and len(wanted) >= max(len(name)/2, 6) for name in names):
+            return 1
+        return 0
+
+    @staticmethod
+    def main_game(entry):
+        kind = (entry.get('game_type') or {}).get('type') if isinstance(entry.get('game_type'), dict) else None
+        return not entry.get('version_parent') and kind in (None, 'Main Game')
+
+    @classmethod
+    def choose(cls, title, results):
+        """(the entry it is sure of, or None; the candidates in order)."""
+        scored = [(cls.sureness(title, entry), entry) for entry in results]
+        for level in (2, 1):
+            sure = [entry for score, entry in scored if score == level]
+            if len(sure) > 1:
+                # Two entries of the same name: the main game over its editions, else ask.
+                main = [entry for entry in sure if cls.main_game(entry)]
+                sure = main if len(main) == 1 else sure
+            if len(sure) == 1:
+                return sure[0], []
+            if sure:
+                return None, sure
+        return None, [entry for _, entry in scored]
+
+    @staticmethod
+    def year(entry):
+        stamp = entry.get('first_release_date')
+        if isinstance(stamp, (int, float)) and stamp > 0:
+            return str(datetime.datetime.fromtimestamp(stamp, datetime.timezone.utc).year)
+        return None
+
+    def summary(self, entry):
+        """{id, name, year, url} for the page; the URL only on IGDB's own site."""
+        url = entry.get('url') if isinstance(entry.get('url'), str) else ''
+        parts = urlsplit(url)
+        return dict(id=entry['id'], name=' '.join(str(entry.get('name') or '?').split())[:120], year=self.year(entry),
+                    url=url if parts.scheme == 'https' and parts.hostname == 'www.igdb.com' else None)
+
+    def about(self, entry, platform):
+        about = {}
+        text = short_text(entry.get('summary') if isinstance(entry.get('summary'), str) else None)
+        if text:
+            about['description'] = text
+        if self.year(entry):
+            about['year'] = self.year(entry)
+
+        def names(items, test=lambda item: True):
+            found = []
+            for item in items or []:
+                name = item.get('name') if isinstance(item, dict) and test(item) else None
+                if isinstance(name, str) and name.strip() and name.strip() not in found:
+                    found.append(' '.join(name.split()))
+            return found
+        genres = names(entry.get('genres'))
+        if genres:
+            about['genre'] = ', '.join(genres[:2])[:60]
+        publishers = [company for company in (entry.get('involved_companies') or [])
+                      if isinstance(company, dict) and company.get('publisher')]
+        publishers = names([company.get('company') for company in publishers])
+        if publishers:
+            about['publisher'] = ', '.join(publishers[:2])[:80]
+        most = [max((mode.get(key) for key in ('offlinemax', 'offlinecoopmax') if isinstance(mode.get(key), int)), default=0)
+                for mode in entry.get('multiplayer_modes') or []
+                if isinstance(mode, dict) and mode.get('platform') in (platform, None)]
+        if most and max(most) > 1:
+            about['players'] = f'1-{min(max(most), 16)}'
+        elif names(entry.get('game_modes')) == ['Single player']:
+            about['players'] = '1'
+        return about
+
+    async def lookup(self, game, art=True, choice=None):
+        platform = self.PLATFORMS.get(game.console)
+        if not platform or choice == 0:
+            return None
+        fields = f'fields {self.FIELDS};'
+        if choice:
+            # The admin's pick: trusted, whatever its name or platforms.
+            results = await self.query('games', f'{fields} where id = {int(choice)}; limit 1;')
+            entry, candidates = (results[0] if results else None), []
+        else:
+            title = clean_title(game.title)
+            entry, candidates, seen = None, [], set()
+            for search in self.searches(title):
+                results = await self.query('games', f'search "{search}"; {fields} where platforms = ({platform}); limit 10;')
+                entry, unsure = self.choose(title, results)
+                if entry:
+                    break
+                for item in unsure:
+                    if item['id'] not in seen:
+                        seen.add(item['id'])
+                        candidates.append(item)
+        if not entry:
+            return Found(candidates=[self.summary(item) for item in candidates[:5]]) if candidates else None
+        found = Found(about=self.about(entry, platform), match=self.summary(entry))
+        image = (entry.get('cover') or {}).get('image_id') if isinstance(entry.get('cover'), dict) else None
+        if art and isinstance(image, str) and self.IMAGE_ID.fullmatch(image):
+            await self.pace()
+            status, body = await self.http.get(self.IMAGE.format(image))
+            if status == 200 and body:
+                found.art = body
+            elif status == 429 or status >= 500:
+                raise ProviderError("IGDB's images are busy: try again later")
+        return found
+
+
+PROVIDERS = ('libretro', 'screenscraper', 'igdb')
 
 
 def providers(names, http, env=os.environ):
@@ -388,6 +644,12 @@ def providers(names, http, env=os.environ):
                 chosen.append(provider)
             else:
                 warnings.append('ScreenScraper needs SOFA_SCREENSCRAPER_DEVID and SOFA_SCREENSCRAPER_DEVPASSWORD')
+        elif name == 'igdb':
+            provider = Igdb.from_env(http, env)
+            if provider:
+                chosen.append(provider)
+            else:
+                warnings.append('IGDB needs SOFA_IGDB_CLIENT_ID and SOFA_IGDB_CLIENT_SECRET')
         else:
             warnings.append(f'Unknown metadata provider {name}: use {", ".join(PROVIDERS)}')
     return chosen, warnings
@@ -440,8 +702,13 @@ class Fetcher:
             finally:
                 self.state.pop(game.id, None)
 
+    def matching(self):
+        """The provider here that lets an admin pick the entry a game matches, by name, or None."""
+        return next((provider.name for provider in self.providers if provider.matches), None)
+
     async def fetch(self, game):
-        art, about, sources, errors = None, {}, [], []
+        art, about, sources, errors, match, candidates = None, {}, [], [], None, []
+        choices = await asyncio.to_thread(self.covers.matches, game.id)
         for provider in self.providers:
             if art and about.get('description'):
                 break
@@ -449,7 +716,10 @@ class Fetcher:
                 errors.append(provider.stopped[0])
                 continue
             try:
-                found = await provider.lookup(game, art=not art)
+                if provider.matches:
+                    found = await provider.lookup(game, art=not art, choice=choices.get(provider.name))
+                else:
+                    found = await provider.lookup(game, art=not art)
             except ProviderError as error:
                 errors.append(str(error))
                 if error.stop:
@@ -457,6 +727,10 @@ class Fetcher:
                 continue
             if not found:
                 continue
+            if found.match and not match:
+                match = dict(found.match, provider=provider.name)
+            elif found.candidates and not match and not candidates:
+                candidates = [dict(item, provider=provider.name) for item in found.candidates]
             if found.art and not art:
                 try:
                     async with self.lock:
@@ -468,13 +742,15 @@ class Fetcher:
                 about.setdefault(key, value)
             if found.about and provider.name not in sources:
                 sources.append(provider.name)
-        if errors and not art and not about:
+        if errors and not art and not about and not candidates:
             # Not cached: an admin can try again once the provider is back.
             self.notes[game.id] = errors[0]
             return
         note = None if art or self.covers.fetched(game.id).is_file() else (errors[0] if errors else 'No art found')
+        if candidates and not match:
+            note = 'Not sure which game this is: choose the match'
         await asyncio.to_thread(self.covers.store_fetched, game.id, art,
-                                dict(sources=sources, about=about, note=note,
+                                dict(sources=sources, about=about, note=note, match=match, candidates=candidates,
                                      fetched=datetime.datetime.now(datetime.timezone.utc).isoformat(timespec='seconds')))
 
     async def close(self):

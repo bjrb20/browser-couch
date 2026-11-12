@@ -47,6 +47,11 @@ body[data-player="2"]{--me:var(--p2)}body[data-player="3"]{--me:var(--p3)}body[d
 .game-about h3{margin:0 0 4px}
 .game-about p{font-size:12px;line-height:1.5;margin:0 0 8px;max-width:70ch}
 .game-about .about-line{color:var(--muted);font-size:11px}
+.game-about .about-line a{color:inherit;margin-left:4px}
+.match-picks{display:flex;flex-wrap:wrap;gap:6px;margin:0 0 10px}
+.match-form{display:flex;flex-wrap:wrap;align-items:end;gap:8px;margin:0 0 10px}
+.match-form label{display:flex;flex-direction:column;gap:4px;font-size:11px;color:var(--muted)}
+.match-form input{width:12ch}
 .no-match{font-size:11px;color:var(--muted);margin:12px 0}
 @media(max-width:900px){.picker-tools{top:-8px}}
 @media(max-width:700px){.join-card.picker-card{width:95%;max-height:96%;max-width:none;padding:14px}.picker-tools{top:-14px}.games{grid-template-columns:repeat(auto-fill,minmax(100px,1fr));gap:9px}.art.placeholder span{font-size:12px}}

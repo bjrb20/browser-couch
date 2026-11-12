@@ -170,15 +170,16 @@ class Room:
 
     async def games(self, request):
         """The game library: console names, titles and ids only."""
-        self.authenticate(request)
+        _, client = self.authenticate(request)
         if not self.library:
             return web.json_response(dict(consoles=[]))
         async with self.scan_lock:
             await self.rescan()
-            listing = await asyncio.to_thread(self.with_covers, self.library.public())
+            listing = await asyncio.to_thread(self.with_covers, self.library.public(), self.can_pick(client))
         return web.json_response(dict(listing, bootScreen=bool(self.launcher and self.launcher.boot_screen),
                                       covers=bool(self.covers and self.covers.root),
-                                      metadata=bool(self.fetcher)))
+                                      metadata=bool(self.fetcher),
+                                      matching=self.fetcher.matching() if self.fetcher else None))
 
     async def rescan(self):
         """Scan the library at most every 10 seconds. The caller holds scan_lock."""
@@ -186,10 +187,11 @@ class Room:
             await asyncio.to_thread(self.library.scan)
             self.scanned_at = time.monotonic()
 
-    def with_covers(self, listing):
+    def with_covers(self, listing, admin=False):
         """The listing with each game's cover version, or None, for the page's cache, and any fetched details.
 
-        No paths, and no provider names or notes except for players who may change covers.
+        No paths. The provider entry a game matched, and the candidates when unsure, only for
+        players who may change covers.
         """
         games = self.library.games
 
@@ -204,6 +206,9 @@ class Room:
                 status = self.fetcher.status(game.id)
                 entry['fetch'] = dict(state=status['state'], note=status['note'] or record.get('note'),
                                       fetched=bool(record))
+                if admin and self.fetcher.matching():
+                    entry['fetch'].update(match=record.get('match'), candidates=record.get('candidates') or [],
+                                          picked=self.covers.matches(game.id))
             return entry
         return dict(listing, consoles=[dict(console, games=[item(entry) for entry in console['games']])
                                        for console in listing['consoles']])
@@ -316,6 +321,29 @@ class Room:
         async with self.cover_lock:
             about, edited = await asyncio.to_thread(self.covers.save_edits, game.id, changes)
         return web.json_response(dict(ok=True, about=about, edited=edited))
+
+    async def match(self, request):
+        """An admin's pick of the entry a game is: {id, provider, entry: id, 0 for none, or null for by name}.
+
+        Drops what was fetched for the game and fetches it again. Uploads and edits stay.
+        """
+        self.cover_admin(request)
+        body = await request.json()
+        if not isinstance(body, dict):
+            raise web.HTTPBadRequest(text='Invalid match')
+        game = self.cover_game(body.get('id'))
+        provider = next((item for item in (self.fetcher.providers if self.fetcher else [])
+                         if item.matches and item.name == body.get('provider')), None)
+        if not provider:
+            raise web.HTTPNotFound(text='No provider here matches games by name')
+        entry = body.get('entry')
+        if entry is not None and (type(entry) is not int or not 0 <= entry < 2**31):
+            raise web.HTTPBadRequest(text='The match should be an entry number')
+        if self.fetcher.status(game.id)['state']:
+            raise web.HTTPConflict(text='This game is being fetched: try again in a moment')
+        async with self.cover_lock:
+            await asyncio.to_thread(self.covers.save_match, game.id, provider.name, entry)
+        return web.json_response(dict(ok=True, queued=self.fetcher.request([game])))
 
     async def admin(self, request):
         """Unlock game picking for this player with the --admin-pin."""
@@ -650,7 +678,7 @@ def make_app(room, trusted_proxies=()):
                            ('release', room.release), ('leave', room.leave), ('admin', room.admin),
                            ('game', room.pick), ('game/stop', room.unpick), ('cover', room.cover_upload),
                            ('cover/remove', room.cover_remove), ('cover/fetch', room.cover_fetch),
-                           ('game/about', room.about_edit)]:
+                           ('game/about', room.about_edit), ('game/match', room.match)]:
         app.router.add_post('/api/' + route, handler)
     app.router.add_get('/api/state', room.state)
     app.router.add_get('/api/library', room.games)

@@ -373,9 +373,11 @@ providers to try, in order:
 |---|---|---|
 | `libretro` | Box art from the [libretro-thumbnails](https://github.com/libretro-thumbnails) repositories: the box, else the title screen, else a screenshot | Nothing |
 | `screenscraper` | Box art, description, year, genre, number of players and publisher from [ScreenScraper](https://www.screenscraper.fr/) | Developer credentials and, for usable quotas, a user account |
+| `igdb` | Box art, description, year, genre, number of players and publisher from [IGDB](https://www.igdb.com/), matched by name | A free Twitch developer application (client id and secret) |
 
 ```sh
 ./run.sh --library DIR --metadata libretro,screenscraper
+./run.sh --library DIR --metadata libretro,igdb
 ```
 
 Nothing is fetched until a player who may choose games asks. They get "Fetch
@@ -391,7 +393,9 @@ the page shows the results as they arrive.
   extension, a disc serial if the name has one in a tag (for example
   `[SLUS-00001]`), the console, and the credentials. Nothing about the players
   or this host, and no file hashes: hashing whole disc images would take too
-  long.
+  long. IGDB: the title as the page shows it (without its `(...)` and `[...]`
+  tags), and the IGDB platform number of its console, with the app's client
+  id and access token.
 - **Names.** libretro-thumbnails names its files after the No-Intro or Redump
   name with ``& * / : ` < > ? \ |`` replaced by `_`. The host does the same, so
   a library named that way matches. When no file has the exact name, the host
@@ -421,6 +425,53 @@ the page shows the results as they arrive.
   `--covers DIR/edited/<game id>.json`, apart from what a provider found, so
   fetching again never changes them. Emptying a field shows the fetched one
   again.
+
+**IGDB.** Free for non-commercial use under the Twitch Developer Services
+Agreement; ask IGDB about a partnership for commercial use. Register an
+application in the Twitch developer console (any OAuth redirect, for example
+`http://localhost`, and the "Confidential" client type), then set:
+
+| Variable | Value |
+|---|---|
+| `SOFA_IGDB_CLIENT_ID` | The application's client id. Required. |
+| `SOFA_IGDB_CLIENT_SECRET` | The application's client secret. Required. |
+
+The host signs in with Twitch's client-credentials flow, sending the secret
+in the body of an HTTPS request, never in a URL, and keeps the access token
+in memory only, until shortly before it expires (about two months). Neither
+is logged or sent to a browser. Requests go one at a time, at most about three
+a second (IGDB allows four, with eight open). When told it is going too fast
+it slows down; when Twitch or IGDB refuses the credentials it stops until the
+host restarts.
+
+How a game is matched:
+
+- It searches for the clean title on the game's console only (PlayStation or
+  PlayStation 2), then for the title with `: ` in place of ` - `, then for the
+  part after the last ` - ` alone.
+- It takes a result only when it is sure: the result's name or one of its
+  alternative names (where IGDB keeps Japanese titles and other spellings) is
+  the same once spacing, punctuation, case and accents are dropped, or is the
+  same with a prefix such as a series name (`007 - Name` and `Series 007:
+  Name`). A sequel or a longer title that only starts the same is never taken.
+  Of two results with the same name, the main game wins over a port or an
+  edition.
+- Otherwise it shows nothing, and keeps up to five results for an admin. The
+  card says "Not sure which game this is: choose the match".
+- **Choosing the match.** A player who may choose games gets "Match" on each
+  card. It shows the match, with a link to its IGDB page, or the candidates to
+  pick from. They can also type the number of any IGDB game (the `id` on its
+  page), set "No match" to fetch nothing from IGDB for that game, or go back to
+  "Match by name". The host checks that right and the number, drops what was
+  fetched for the game (art included) and fetches it again. Uploads and your
+  own details stay. Picks are kept in `--covers DIR/matched/<game id>.json`.
+
+The year is the first release date, the genre the first two genres, the
+publisher the companies IGDB marks as publisher, and the number of players
+the most local players of the game's multiplayer modes on that console ("1"
+for a single-player-only game). Cover images come from IGDB's own image host
+at 528 × 748. As with the other providers, the art belongs to each game's
+developers and publishers: keep it for your own library.
 
 **libretro-thumbnails.** No account or key. The repositories state no licence
 for the images: the art belongs to each game's developers and publishers.
