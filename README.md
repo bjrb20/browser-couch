@@ -70,6 +70,9 @@ in `/lan/` is necessary. The page adds it if a player leaves it out.
 3. You get the first open player slot. To change, click a different open slot.
 4. Click **Enable sound** below the picture.
 5. Keep the tab in front. If you change tabs, your controller releases.
+6. If the page reloads, or you close the tab and come back, you rejoin by
+   yourself with the same name and slot (if nobody took it meanwhile). Untick
+   **Remember this device** on a shared computer.
 
 Use the left hand to move and the right hand for the buttons.
 
@@ -636,6 +639,58 @@ automatically. See the [official core documentation](https://docs.libretro.com/l
   HTTP LAN addresses, use keyboard/touch or configure HTTPS.
 - Enable sound with the button below the stream. Leaving, losing focus or
   hiding the tab clears that browser's controller. The shared game continues.
+
+### Remembered devices
+
+When you join, **Remember this device** (on by default) lets a refresh, a
+crash or a reopened tab come straight back into the room, with no room code:
+
+- Same name. Same player slot, if it is still free; otherwise the first open
+  one, and the page says so.
+- Host controls too, if this device unlocked them with the host PIN.
+- **Leave** keeps the device remembered but does not rejoin by itself: the
+  page offers **Rejoin** and **Forget this device**.
+- **Log out and forget this device** (below the controls) ends it everywhere on
+  the host. **Lock host controls** drops only the host rights.
+
+How it works:
+
+- The host sets two cookies, `sofa_link_player` and `sofa_link_admin`, each a
+  random 256-bit token. They are `HttpOnly` (no script on the page can read
+  them), `SameSite=Strict`, and `Secure` over HTTPS. They are only ever swapped
+  at `/api/resume` for the short-lived connection token the page already used.
+- The host keeps an HMAC-SHA256 of each token, keyed with the code that issued
+  it (the room code for players, the host PIN for host rights), never the token
+  itself. The file holds nothing that logs anyone in, and nothing to test a
+  guessed code against.
+- A player login lasts 30 days from its last use. Host rights last 7 days from
+  when the host PIN was typed, however often they are used.
+- Changing `SOFA_PIN` logs out every remembered player. Changing
+  `SOFA_ADMIN_PIN` removes every remembered device's host rights.
+- The records live in `remembered-devices.json` in the saves folder (mode 0600,
+  at most 500 records), so they survive a restart or a new build. Delete the
+  file to log everyone out.
+
+### Move players (host)
+
+After the host PIN, **Manage players** lists everyone in the room and their
+slot. Each person has a **Move…** menu and a **Remove** button, with 44 px
+targets on a phone. It works during a game:
+
+- **Player N (open):** move them to a free slot.
+- **Player N (swap with X):** swap two players.
+- **Player N (instead of X):** seat someone who was watching; X then watches.
+- **Watching (free the slot):** free their slot.
+- **Remove:** take them out of the room and forget their device. They need the
+  room code to come back.
+
+The players who moved see "You are now Player N" over the picture at once,
+including in the full-window phone view. Their keyboard, gamepad and touch
+buttons drive the new slot and take its colour, and any buttons they were
+holding are let go. The live view of the host's games list belongs to whoever
+is choosing, not to a slot, so it carries on for everyone; it ends if the
+chooser is removed. The host checks the host rights on every
+change, and a room started without a host PIN has no seat controls.
 
 The default is a multitap in port 1 and four browser slots. If a game does
 not recognize the controllers, test `--multitap 'port 2'`. For a normal two-pad

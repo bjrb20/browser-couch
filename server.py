@@ -32,6 +32,7 @@ from library import Library
 import metadata
 from media import GameAudio, GameVideo
 from session import Launcher, Session, multitap_default
+from sessions import ADMIN_FOR, PLAYER_FOR, Sessions
 from systems import PROFILES
 import tracer
 
@@ -47,6 +48,8 @@ MIRROR_PICKED = 3  # seconds a pick stays picked out for viewers before "Startin
 MIRROR_RATE = 25  # updates a second from the chooser, at most; the page sends at most 20
 MIRROR_SEARCH = 40  # characters of search text
 LAYOUT = re.compile(r'[pd][0-9]{1,2}')  # phone or desktop, and how many columns of cards
+# Remembered devices (see sessions.py): HttpOnly, so no script on the page can read them.
+PLAYER_COOKIE, ADMIN_COOKIE = 'sofa_link_player', 'sofa_link_admin'
 log = logging.getLogger('stream')
 
 
@@ -100,8 +103,10 @@ def host_ice_servers(servers):
 
 class Room:
     def __init__(self, session, pin, ice_servers=None, udp_ports=None, library=None, launcher=None,
-                 admin_pin=None, covers=None, providers=(), http=None):
+                 admin_pin=None, covers=None, providers=(), http=None, sessions=None):
         self.udp_ports = udp_ports
+        self.sessions = sessions or Sessions(None, pin, admin_pin)
+        self.gone = {}  # token -> why it was ended, for the page's next request
         self.covers = covers
         self.cover_lock = asyncio.Lock()
         self.fetcher = metadata.Fetcher(covers, list(providers), http or metadata.Http(), self.cover_lock) \
@@ -137,7 +142,7 @@ class Room:
         header = request.headers.get('Authorization', '')
         token = header[7:] if header.startswith('Bearer ') else ''
         if token not in self.clients:
-            raise web.HTTPUnauthorized(text='Join the room first')
+            raise web.HTTPUnauthorized(text=self.gone.get(token) or 'Join the room first')
         self.clients[token]['seen'] = time.monotonic()
         return token, self.clients[token]
 
@@ -172,17 +177,186 @@ class Room:
         name = body.get('name', '')
         if not isinstance(name, str) or not name.strip() or len(name) > 24:
             raise web.HTTPBadRequest(text='Enter a name of 1–24 characters')
+        admin = self.admin_cookie(request)
+        token, client = self.add_client(name.strip(), admin=admin)
+        response = web.json_response(dict(token=token, iceServers=self.ice_servers, name=client['name'],
+                                          admin=bool(admin)))
+        old = self.sessions.check('player', request.cookies.get(PLAYER_COOKIE))
+        if body.get('remember', True) is not False:
+            cookie, client['session'] = self.sessions.issue('player', name=client['name'], slot=None)
+            set_cookie(request, response, PLAYER_COOKIE, cookie, PLAYER_FOR)
+        else:
+            response.del_cookie(PLAYER_COOKIE, path='/')
+        self.sessions.revoke(old)
+        return response
+
+    def add_client(self, name, session=None, admin=None):
+        """A connection to the room. `session` and `admin` are the device's remembered logins, if any."""
         token = secrets.token_urlsafe(32)
-        self.clients[token] = dict(name=name.strip(), seen=now, pc=None, tracks=[], channel=None, ws=None,
-                                  admin=False)
-        return web.json_response(dict(token=token, iceServers=self.ice_servers))
+        self.clients[token] = dict(name=name, seen=time.monotonic(), pc=None, tracks=[], channel=None, ws=None,
+                                   admin=bool(admin), id=secrets.token_hex(6), session=session, admin_session=admin)
+        return token, self.clients[token]
+
+    def admin_cookie(self, request):
+        """The key of this device's live admin login, or None."""
+        return self.sessions.check('admin', request.cookies.get(ADMIN_COOKIE)) if self.admin_pin else None
+
+    def note_gone(self, token, why):
+        if len(self.gone) > 256:
+            self.gone.clear()
+        self.gone[token] = why
+
+    async def resume(self, request):
+        """Rejoin with this device's remembered login, after a refresh or with a reopened tab: {rejoin}.
+
+        A device that chose Leave is not taken back in until it asks to rejoin. Its old connection, if the
+        page never said goodbye, gives way, and the new one gets the same player slot if it is free.
+        """
+        body = await request.json() if request.can_read_body else {}
+        cookie = request.cookies.get(PLAYER_COOKIE)
+        key = self.sessions.check('player', cookie)
+        if not key:
+            response = web.json_response(dict(remembered=False, expired=bool(cookie)))
+            if cookie:
+                self.throttle(request.remote, 'join').append(time.monotonic())
+                response.del_cookie(PLAYER_COOKIE, path='/')
+            return response
+        record = self.sessions.get(key)
+        if record.get('left') and not (isinstance(body, dict) and body.get('rejoin') is True):
+            return web.json_response(dict(remembered=True, name=record['name']))
+        wanted = record.get('slot')
+        for old, client in list(self.clients.items()):
+            if client['session'] == key:
+                held = self.hub.slot_of(old)
+                wanted = held if held is not None else wanted
+                self.note_gone(old, 'This device rejoined the room from another tab.')
+                await self.remove(old)
+        if len(self.clients) >= 12:
+            raise web.HTTPServiceUnavailable(text='The room is full')
+        admin = self.admin_cookie(request)
+        token, client = self.add_client(record['name'], session=key, admin=admin)
+        slot = None
+        if type(wanted) is int and wanted < self.hub.players:
+            try:
+                self.hub.seat(token, wanted)
+                slot = wanted
+            except ValueError:
+                pass
+        self.sessions.update(key, left=False, slot=slot if slot is not None else wanted)
+        self.sessions.touch(key)
+        response = web.json_response(dict(remembered=True, token=token, iceServers=self.ice_servers,
+                                          name=client['name'], slot=slot, wanted=wanted, admin=bool(admin)))
+        set_cookie(request, response, PLAYER_COOKIE, cookie, PLAYER_FOR)
+        self.push_seats()
+        return response
+
+    async def forget(self, request):
+        """Log out and forget this device: both remembered logins end, and its connection leaves."""
+        keys = [self.sessions.check('player', request.cookies.get(PLAYER_COOKIE)), self.admin_cookie(request)]
+        header = request.headers.get('Authorization', '')
+        token = header[7:] if header.startswith('Bearer ') else ''
+        if token in self.clients:
+            keys += [self.clients[token]['session'], self.clients[token]['admin_session']]
+            await self.remove(token)
+        self.sessions.revoke(*keys)
+        response = web.json_response(dict(ok=True))
+        response.del_cookie(PLAYER_COOKIE, path='/')
+        response.del_cookie(ADMIN_COOKIE, path='/')
+        return response
+
+    def sync_seats(self):
+        """Each remembered player's slot, for their next rejoin."""
+        for token, client in self.clients.items():
+            if client['session']:
+                self.sessions.update(client['session'], slot=self.hub.slot_of(token))
+
+    def push(self, data, skip=None):
+        """Send a small message to every page over the channel it already has."""
+        text = json.dumps(data, separators=(',', ':'))
+        for token, client in list(self.clients.items()):
+            if token != skip:
+                self.send(client, text)
+
+    def send(self, client, text):
+        channel, ws = client['channel'], client['ws']
+        try:
+            if channel and channel.readyState == 'open':
+                channel.send(text)
+            elif ws and not ws.closed:
+                task = asyncio.get_running_loop().create_task(ws.send_str(text))
+                self.sends.add(task)
+                task.add_done_callback(self.sends.discard)
+        except (ConnectionError, RuntimeError):
+            pass
+
+    def push_seats(self):
+        """Slots changed: every page asks for the room state now, not at its next poll."""
+        self.push(dict(t='seats'))
+
+    def is_admin(self, client):
+        return bool(self.admin_pin) and client['admin']
+
+    async def seats(self, request):
+        """An admin moves players between slots, live: {action: seat, player, slot} puts a player in a free
+        slot (slot null: just watching; replace: true takes a taken slot, and its player watches); {action: swap, a, b} swaps two slots; {action: free, slot};
+        {action: kick, player} removes a player and forgets their device.
+
+        Only a player who entered the admin PIN may. Input follows the slot at the next poll.
+        """
+        token, client = self.authenticate(request)
+        if not self.is_admin(client):
+            raise web.HTTPForbidden(text='Enter the host PIN to move players')
+        body = await request.json()
+        if not isinstance(body, dict):
+            raise web.HTTPBadRequest(text='Invalid request')
+        action = body.get('action')
+        players = {entry['id']: owner for owner, entry in self.clients.items()}
+        target = players.get(body.get('player')) if isinstance(body.get('player'), str) else None
+        if action in ('seat', 'kick') and not target:
+            raise web.HTTPNotFound(text='That player has left the room')
+        try:
+            if action == 'seat':
+                slot = body.get('slot')
+                if body.get('replace') is True and type(slot) is int and 0 <= slot < self.hub.players:
+                    occupant = self.hub.slots()[slot]
+                    if occupant and occupant != target:
+                        self.hub.seat(occupant, None)  # a watcher takes the slot; its player watches
+                self.hub.seat(target, slot)
+            elif action == 'swap':
+                self.hub.swap(body.get('a'), body.get('b'))
+            elif action == 'free':
+                slot = body.get('slot')
+                if type(slot) is not int or not 0 <= slot < self.hub.players:
+                    raise ValueError('Choose a valid player slot')
+                owner = self.hub.slots()[slot]
+                if owner:
+                    self.hub.seat(owner, None)
+            elif action == 'kick':
+                if target == token:
+                    raise web.HTTPBadRequest(text='Use Leave to leave the room yourself')
+                gone = self.clients[target]
+                self.sessions.revoke(gone['session'], gone['admin_session'])
+                self.note_gone(target, 'The host removed you from the room.')
+                self.send(gone, json.dumps(dict(t='removed')))
+                await self.remove(target)
+            else:
+                raise web.HTTPBadRequest(text='Unknown action')
+        except ValueError as error:
+            raise web.HTTPConflict(text=str(error)) from error
+        self.sync_seats()
+        self.push_seats()
+        return web.json_response(dict(ok=True))
 
     async def state(self, request):
         token, client = self.authenticate(request)
         slots = [dict(number=n+1, name=self.clients[owner]['name'] if owner in self.clients else None,
                       yours=owner == token) for n, owner in enumerate(self.hub.slots())]
         captured = getattr(self.session, 'frame_at', None)
-        return web.json_response(dict(slots=slots, host=self.session.status(),
+        admin = self.is_admin(client)
+        roster = [dict(id=entry['id'], name=entry['name'], slot=self.hub.slot_of(owner), admin=self.is_admin(entry),
+                       you=owner == token) for owner, entry in self.clients.items()] if admin else None
+        return web.json_response(dict(slots=slots, host=self.session.status(), admin=admin, roster=roster,
+                                      remembered=bool(client['session']),
                                       inputPollMs=self.hub.timing(token),
                                       sourceFrameAgeMs=max(0, (time.monotonic()-captured)*1000) if captured else None,
                                       viewers=len(self.clients), canPick=self.can_pick(client),
@@ -323,18 +497,8 @@ class Room:
                                name=mirror['name'] if mirror else None,
                                s=mirror['s'] if mirror else None), separators=(',', ':'))
         for token, client in self.clients.items():
-            if mirror and token == mirror['owner']:
-                continue
-            channel, ws = client['channel'], client['ws']
-            try:
-                if channel and channel.readyState == 'open':
-                    channel.send(text)
-                elif ws and not ws.closed:
-                    task = asyncio.get_running_loop().create_task(ws.send_str(text))
-                    self.sends.add(task)
-                    task.add_done_callback(self.sends.discard)
-            except (ConnectionError, RuntimeError):
-                pass
+            if not (mirror and token == mirror['owner']):
+                self.send(client, text)
 
     async def games(self, request):
         """The game library: console names, titles and ids only."""
@@ -556,7 +720,22 @@ class Room:
             attempts.append(time.monotonic())
             raise web.HTTPForbidden(text='The PIN is incorrect')
         client['admin'] = True
-        return web.json_response(dict(ok=True))
+        response = web.json_response(dict(ok=True))
+        if client['session']:  # a remembered device keeps the admin login too, for a shorter time
+            old = self.admin_cookie(request)
+            cookie, client['admin_session'] = self.sessions.issue('admin')
+            set_cookie(request, response, ADMIN_COOKIE, cookie, ADMIN_FOR)
+            self.sessions.revoke(old)
+        return response
+
+    async def admin_lock(self, request):
+        """Give up the admin rights on this device, and its remembered admin login."""
+        _, client = self.authenticate(request)
+        self.sessions.revoke(client['admin_session'], self.admin_cookie(request))
+        client['admin'], client['admin_session'] = False, None
+        response = web.json_response(dict(ok=True))
+        response.del_cookie(ADMIN_COOKIE, path='/')
+        return response
 
     def picker_rights(self, request):
         _, client = self.authenticate(request)
@@ -596,6 +775,8 @@ class Room:
             tap = tap if isinstance(tap, bool) else await asyncio.to_thread(self.multitap, game)
             _, players, _ = self.launcher.plan(game, tap)
             self.hub.resize(players)
+            self.sync_seats()
+            self.push_seats()
             try:
                 boot = body.get('bootScreen')
                 boot = boot if isinstance(boot, bool) else None
@@ -633,11 +814,15 @@ class Room:
             self.hub.claim(token, body.get('slot'))
         except (ValueError, AttributeError) as error:
             raise web.HTTPConflict(text=str(error)) from error
+        self.sync_seats()
+        self.push_seats()
         return web.json_response(dict(ok=True))
 
     async def release(self, request):
         token, _ = self.authenticate(request)
         self.hub.release(token)
+        self.sync_seats()
+        self.push_seats()
         return web.json_response(dict(ok=True))
 
     async def close_peer(self, client):
@@ -654,16 +839,26 @@ class Room:
         self.choosers.pop(token, None)
         if self.mirror and self.mirror['owner'] == token:
             self.end_mirror()
+        held = self.hub.slot_of(token) is not None
         self.hub.forget(token)
+        if held:
+            self.push_seats()
         if client:
             await self.close_peer(client)
             if client['ws']:
                 await client['ws'].close()
 
     async def leave(self, request):
-        token, _ = self.authenticate(request)
+        """Leave the room: {unload: true} when the page is closing or reloading, which a rejoin undoes by itself.
+
+        Otherwise the player chose to leave: the device stays remembered, but asks before rejoining.
+        """
+        token, client = self.authenticate(request)
+        body = await request.json() if request.can_read_body else {}
+        if not (isinstance(body, dict) and body.get('unload') is True):
+            self.sessions.update(client['session'], left=True)
         await self.remove(token)
-        return web.json_response(dict(ok=True))
+        return web.json_response(dict(ok=True, remembered=bool(client['session']), name=client['name']))
 
     async def offer(self, request):
         token, client = self.authenticate(request)
@@ -913,6 +1108,12 @@ async def same_origin(request, handler):
     return response
 
 
+def set_cookie(request, response, name, value, max_age):
+    """A remembered login: HttpOnly, sent to this site only, and over HTTPS only when the page is."""
+    response.set_cookie(name, value, max_age=max_age, path='/', httponly=True, samesite='Strict',
+                        secure=request.scheme == 'https')
+
+
 def make_app(room, trusted_proxies=()):
     app = web.Application(middlewares=[forwarded(trusted_proxies), same_origin], client_max_size=256*1024)
     for route, handler in [('join', room.join), ('offer', room.offer), ('claim', room.claim),
@@ -920,7 +1121,9 @@ def make_app(room, trusted_proxies=()):
                            ('game', room.pick), ('game/stop', room.unpick), ('cover', room.cover_upload),
                            ('cover/remove', room.cover_remove), ('cover/fetch', room.cover_fetch),
                            ('game/about', room.about_edit), ('game/match', room.match),
-                           ('game/multitap', room.multitap_choice), ('picker', room.choose)]:
+                           ('game/multitap', room.multitap_choice), ('picker', room.choose),
+                           ('resume', room.resume), ('forget', room.forget), ('admin/lock', room.admin_lock),
+                           ('seats', room.seats)]:
         app.router.add_post('/api/' + route, handler)
     app.router.add_get('/api/state', room.state)
     app.router.add_get('/api/library', room.games)
@@ -1038,7 +1241,8 @@ def main():
         session, pin, ice, args.udp_ports, library,
         Launcher(args.system, args.saves, ROOT/'runtime/cores', args.players, tuple(args.core_option),
                  args.boot_screen),
-        args.admin_pin, Covers(args.covers, args.library) if library else None, providers, http),
+        args.admin_pin, Covers(args.covers, args.library) if library else None, providers, http,
+        Sessions(Path(args.saves)/'remembered-devices.json', pin, args.admin_pin)),
         args.trusted_proxy), host=args.host, port=args.port, ssl_context=context, access_log=None)
 
 

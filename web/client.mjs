@@ -10,7 +10,7 @@ let analog=false,lastSentAxes='';
 const incoming=new MediaStream(),incomingAudio=new MediaStream();
 async function api(path,body){
   const response=await fetch('api/'+path,{method:body===undefined?'GET':'POST',headers:{'Content-Type':'application/json',...(token?{Authorization:'Bearer '+token}:{})},...(body===undefined?{}:{body:JSON.stringify(body)})});
-  if(!response.ok)throw new Error((await response.text()).slice(0,240));return response.json();
+  if(!response.ok){const error=new Error((await response.text()).slice(0,240));error.status=response.status;throw error;}return response.json();
 }
 function message(text){$('message').textContent=text;}
 function connected(text,active=false){$('connection').textContent=text;$('connection').classList.toggle('connected',active);}
@@ -43,17 +43,55 @@ function updatePads(){
 function renderSlots(){
   const slots=roomState?.slots||Array.from({length:4},(_,n)=>({number:n+1,name:null,yours:false}));
   mine=slots.findIndex(s=>s.yours);
+  // An admin's move, or a game with fewer slots: say so clearly, and start the new slot with nothing held.
+  if(token&&lastMine!==null&&mine!==lastMine){if(mine!==expectedMine)seatNotice(mine);clearInput();}
+  lastMine=token&&roomState?mine:null;if(mine===expectedMine)expectedMine=null;
   if(mine>=0)document.body.dataset.player=String(mine%4+1);else delete document.body.dataset.player;
   $('slots').replaceChildren(...slots.map((s,n)=>{
     const b=document.createElement('button');b.className='slot p'+(n%4+1)+(s.yours?' yours':s.name?' taken':'');b.disabled=!token||!controlReady()||Boolean(s.name&&!s.yours);
     const number=document.createElement('b');number.textContent=String(s.number).padStart(2,'0');
     const label=document.createElement('span'),name=document.createTextNode(s.name||'Open slot'),small=document.createElement('small');small.textContent=s.yours?'Your controller':s.name?'Player '+s.number:'Join as Player '+s.number;label.append(name,small);
     const mark=document.createElement('em');mark.textContent=s.yours?'YOU':s.name?'IN':'+';b.append(number,label,mark);
-    b.addEventListener('click',async()=>{try{clearInput();await api('claim',{slot:n});await refresh();message('You are Player '+(n+1)+'. '+(n===0?'Use Enter / Start and Cross to navigate the game.':'Wait for Player 1 to choose multiplayer.'));}catch(e){message(e.message);}});return b;
+    b.addEventListener('click',async()=>{try{clearInput();expectedMine=n;await api('claim',{slot:n});await refresh();message('You are Player '+(n+1)+'. '+(n===0?'Use Enter / Start and Cross to navigate the game.':'Wait for Player 1 to choose multiplayer.'));}catch(e){message(e.message);}});return b;
   }));
   $('spectate').disabled=!token;$('spectate').textContent=mine<0?'Just watching':'Release my player slot';
-  $('viewer-count').textContent=(roomState?.viewers||0)+' in room';
+  $('viewer-count').textContent=(roomState?.viewers||0)+' in room';renderManage();
+  $('forget').hidden=!token||!roomState?.remembered;$('device-note').textContent=!token?'':roomState?.remembered?'This device rejoins by itself after a refresh.':'This device is not remembered.';
   if(controlReady())connected(mine>=0?'Player '+(mine+1)+' connected':'Watching',true);
+}
+let lastMine=null,expectedMine=null,noticeTimer=null,manageDrawn='';
+function seatNotice(n){
+  const box=$('seat-notice');box.textContent=n>=0?'You are now Player '+(n+1):'You are now watching';box.className='seat-notice'+(n>=0?' p'+(n%4+1):'');box.hidden=false;
+  message(n>=0?'The host moved you: you are now Player '+(n+1)+'.':'You no longer have a player slot. Choose an open slot to play.');
+  clearTimeout(noticeTimer);noticeTimer=setTimeout(()=>{box.hidden=true;},6000);
+}
+// Admins: everyone in the room, and a menu per player to move, swap, free or remove them. The host checks the right.
+function renderManage(){
+  const roster=token&&roomState?.admin?roomState.roster:null,slots=roomState?.slots||[];
+  $('manage').hidden=!roster;if(!roster){manageDrawn='';return;}
+  const drawn=JSON.stringify([roster,slots.map(s=>s.name)]);if(drawn===manageDrawn)return;manageDrawn=drawn;
+  const owner=n=>roster.find(p=>p.slot===n);
+  $('roster').replaceChildren(...[...roster].sort((a,b)=>(a.slot??99)-(b.slot??99)).map(p=>{
+    const row=document.createElement('li'),who=document.createElement('span'),name=document.createElement('b'),where=document.createElement('small'),move=document.createElement('select');
+    row.className='p'+((p.slot??-1)%4+1);name.textContent=p.name+(p.you?' (you)':'');where.textContent=p.slot===null?'Watching':'Player '+(p.slot+1);who.append(name,where);
+    move.setAttribute('aria-label','Move '+p.name);
+    move.append(new Option('Move…',''),...slots.map((s,n)=>{const other=owner(n);
+      const o=new Option('Player '+(n+1)+(other&&other.id!==p.id?(p.slot===null?' (instead of ':' (swap with ')+other.name+')':other?' (now)':' (open)'),String(n));o.disabled=other?.id===p.id;return o;}),
+      Object.assign(new Option('Watching (free the slot)','watch'),{disabled:p.slot===null}));
+    move.addEventListener('change',()=>{const v=move.value;move.value='';if(v==='')return;
+      if(v==='watch')void seats({action:'free',slot:p.slot},p.name+' is now watching.');
+      else{const n=Number(v),other=owner(n);
+        if(other&&p.slot!==null)void seats({action:'swap',a:p.slot,b:n},p.name+' and '+other.name+' swapped.');
+        else void seats({action:'seat',player:p.id,slot:n,replace:true},p.name+' is now Player '+(n+1)+(other?'; '+other.name+' is watching.':'.'));}});
+    row.append(who,move);
+    if(!p.you){const kick=document.createElement('button');kick.type='button';kick.className='kick';kick.textContent='Remove';kick.setAttribute('aria-label','Remove '+p.name+' from the room');
+      kick.addEventListener('click',()=>{if(confirm('Remove '+p.name+' from the room? Their device is forgotten: they need the room code to come back.'))void seats({action:'kick',player:p.id},p.name+' was removed from the room.');});row.append(kick);}
+    return row;}));
+}
+async function seats(body,done){
+  const self=roomState?.roster?.find(p=>p.you);
+  if(self&&(body.player===self.id||body.a===self.slot||body.b===self.slot||body.slot===self.slot))expectedMine=null;  // an admin moving themselves still sees the notice
+  try{await api('seats',body);message(done);}catch(e){message(e.message);}manageDrawn='';await refresh();
 }
 // With no game running, players stay connected and the screen asks for a console and game.
 // "Change game" opens the same list over a running game. Browsers only ever get titles, ids and covers.
@@ -482,15 +520,25 @@ $('np-form').addEventListener('submit',async event=>{
   if(!Object.keys(changes).length){$('np-form').hidden=true;drawNowPlaying();return;}
   try{const r=await api('game/about',{id:game.id,...changes});game.about=r.about;game.edited=r.edited;$('np-form').hidden=true;drawNowPlaying();message('Details saved for '+game.title+'.');libraryAt=0;}catch(e){message(e.message);}
 });
-async function refresh(){
-  if(!token||polling)return;polling=true;
-  try{roomState=await api('state');renderSlots();renderGame();mirrorReceive(roomState.mirror);drawMirror();renderNowPlaying();renderActivity();reportPicker();const hz=roomState.host.emulationHz;$('host-info').textContent=!roomState.host.game?'No game loaded':roomState.host.core+' · '+(Number.isFinite(hz)?Math.round(hz)+'/':'')+roomState.host.fps+' Hz game'+(roomState.host.multitap==='none'?'':' · '+roomState.host.multitap+' multitap');if(roomState.host.console){$('pad-label').textContent='KEYBOARD → '+roomState.host.pad.toUpperCase();setAnalog(!!roomState.host.analog);$('game-label').textContent='ORIGINAL '+roomState.host.console+' GAME · BROWSER STREAMING';}if(roomState.host.error&&roomState.host.game)message('The emulator stopped: '+roomState.host.error);renderDiagnostics();}
-  catch(e){message(e.message);}finally{polling=false;}
+// One request at a time. A call during one runs once more after it, and resolves when that is done.
+let refreshing=null,again=false;
+function refresh(){
+  if(!token)return Promise.resolve();
+  if(refreshing){again=true;return refreshing;}
+  refreshing=(async()=>{try{do{again=false;await refreshOnce();}while(again&&token);}finally{refreshing=null;}})();
+  return refreshing;
 }
-async function leaveRoom(notify=true){
-  clearInput();const old=token;token=null;mine=-1;roomState=null;forgetCovers();library=null;pickerDrawn='';
+async function refreshOnce(){
+  if(!token)return;polling=true;
+  try{roomState=await api('state');renderSlots();renderGame();mirrorReceive(roomState.mirror);drawMirror();renderNowPlaying();renderActivity();reportPicker();const hz=roomState.host.emulationHz;$('host-info').textContent=!roomState.host.game?'No game loaded':roomState.host.core+' · '+(Number.isFinite(hz)?Math.round(hz)+'/':'')+roomState.host.fps+' Hz game'+(roomState.host.multitap==='none'?'':' · '+roomState.host.multitap+' multitap');if(roomState.host.console){$('pad-label').textContent='KEYBOARD → '+roomState.host.pad.toUpperCase();setAnalog(!!roomState.host.analog);$('game-label').textContent='ORIGINAL '+roomState.host.console+' GAME · BROWSER STREAMING';}if(roomState.host.error&&roomState.host.game)message('The emulator stopped: '+roomState.host.error);renderDiagnostics();}
+  catch(e){if(e.status===401&&token){await leaveRoom(false,false);message(e.message);}else message(e.message);}finally{polling=false;}
+}
+// `call`: tell the host. Not when the host has already ended this connection.
+async function leaveRoom(notify=true,call=true){
+  clearInput();const old=token;token=null;mine=-1;lastMine=null;expectedMine=null;roomState=null;$('seat-notice').hidden=true;forgetCovers();library=null;pickerDrawn='';
   pickerSent={open:false,at:0};pickerTouched=0;mirrorOut.on=false;mirrorIn=null;mirrorHidden=null;unmirror();renderActivity();
-  if(old)try{await fetch('api/leave',{method:'POST',headers:{Authorization:'Bearer '+old,'Content-Type':'application/json'},body:'{}'});}catch{}
+  let left=null;
+  if(old&&call)try{const r=await fetch('api/leave',{method:'POST',headers:{Authorization:'Bearer '+old,'Content-Type':'application/json'},body:'{}'});if(r.ok)left=await r.json();}catch{}
   const oldPC=pc;pc=null;channel=null;if(oldPC)oldPC.close();
   const oldSocket=socket;socket=null;fallbackReady=false;if(oldSocket)oldSocket.close();
   latestJPEG=null;$('fallback').hidden=true;video.hidden=false;
@@ -502,7 +550,24 @@ async function leaveRoom(notify=true){
   $('join-panel').hidden=false;$('game-picker').hidden=true;$('loading').hidden=true;$('join').disabled=false;$('sound').disabled=true;$('leave').disabled=true;
   $('screen').classList.remove('playing');fitSideways();
   $('stream-info').textContent='Waiting for a stream';document.querySelector('.live').classList.remove('active');connected('Not connected');renderSlots();
+  showRejoin(left?.remembered?left.name:null);
   if(notify)message('You left the room. Your player slot has been released.');
+}
+// A remembered device that chose Leave: one tap rejoins, without the room code.
+function showRejoin(name){$('rejoin').hidden=!name;$('join-form').hidden=Boolean(name);if(name){$('rejoin-name').textContent=name;$('name').value=name;}}
+// A refresh or a reopened tab: the host knows this device by its HttpOnly cookie, which this page never sees.
+async function resume(rejoin=false){
+  if(token||joining)return;joining=true;
+  try{const r=await api('resume',{rejoin});
+    if(r.token){await enter(r);return;}
+    showRejoin(r.remembered?r.name:null);
+    if(r.remembered)message('Tap Rejoin to come back to the room.');
+    if(r.expired)message('This device’s saved login has ended. Enter the room code to join again.');
+  }catch(e){message(e.message);}finally{joining=false;}
+}
+async function forgetDevice(){
+  try{await api('forget',{});}catch(e){message(e.message);return;}
+  if(token)await leaveRoom(false,false);showRejoin(null);message('Logged out. This device is forgotten: join with the room code next time.');
 }
 function renderDiagnostics(){
   const ms=value=>Number.isFinite(value)?Math.round(value)+' ms':'—';
@@ -547,7 +612,7 @@ async function connectSocket(){
     ws.addEventListener('open',()=>ws.send(JSON.stringify({token})));
     ws.addEventListener('message',event=>{
       if(typeof event.data==='string'){
-        try{const data=JSON.parse(event.data);if(data.t==='ready'){sampleRate=data.sampleRate;fallbackReady=true;clearTimeout(timer);resolve();}else if(data.t==='pong')rtt=Math.round(performance.now()-data.sent);else if(data.t==='mirror')mirrorReceive(data);}catch{}
+        try{const data=JSON.parse(event.data);if(data.t==='ready'){sampleRate=data.sampleRate;fallbackReady=true;clearTimeout(timer);resolve();}else roomMessage(data);}catch{}
       }else{const bytes=new Uint8Array(event.data);if(bytes[0]===1){latestJPEG=event.data.slice(1);void drawJPEG();}else if(bytes[0]===2)playPCM(event.data.slice(1));}
     });
     ws.addEventListener('error',()=>{clearTimeout(timer);reject(new Error('The host connection failed.'));});
@@ -561,13 +626,19 @@ async function waitForICE(peer){
     function change(){if(peer.iceGatheringState==='complete'){clearTimeout(timer);peer.removeEventListener('icegatheringstatechange',change);resolve();}}peer.addEventListener('icegatheringstatechange',change);change();});
 }
 $('join-form').addEventListener('submit',async event=>{
-  event.preventDefault();if(joining)return;joining=true;$('join').disabled=true;$('loading').hidden=false;connected('Connecting');
+  event.preventDefault();if(joining)return;joining=true;
+  try{const joined=await api('join',{name:$('name').value.trim(),pin:$('pin').value,remember:$('remember').checked});$('pin').value='';await enter(joined);}
+  catch(error){message(error.message);}finally{joining=false;}
+});
+// Join with a room code, or rejoin as a remembered device: connect the stream, then take a slot.
+async function enter(joined){
+  $('join').disabled=true;$('rejoin-button').disabled=true;$('loading').hidden=false;connected('Connecting');
   try{
-    const joined=await api('join',{name:$('name').value.trim(),pin:$('pin').value});token=joined.token;
+    token=joined.token;$('name').value=joined.name||$('name').value;showRejoin(null);
     pc=new RTCPeerConnection({iceServers:joined.iceServers});const peer=pc;
     peer.addTransceiver('video',{direction:'recvonly'});peer.addTransceiver('audio',{direction:'recvonly'});
     channel=peer.createDataChannel('controls',{ordered:false,maxRetransmits:0});
-    channel.addEventListener('message',event=>{try{const data=JSON.parse(event.data);if(data.t==='pong')rtt=Math.round(performance.now()-data.sent);else if(data.t==='mirror')mirrorReceive(data);}catch{}});
+    channel.addEventListener('message',event=>{try{roomMessage(JSON.parse(event.data));}catch{}});
     peer.addEventListener('track',event=>{
       preferFreshPlayback(event.receiver);
       if(event.track.kind==='video'){incoming.addTrack(event.track);video.srcObject=incoming;video.play().catch(()=>message('Tap the video to start playback.'));}
@@ -582,20 +653,32 @@ $('join-form').addEventListener('submit',async event=>{
       const answer=await api('offer',{sdp:peer.localDescription.sdp,type:'offer'});await peer.setRemoteDescription(answer);
       await new Promise((resolve,reject)=>{const timer=setTimeout(()=>reject(new Error('WebRTC did not connect')),8000);if(channel.readyState==='open'){clearTimeout(timer);resolve();}else channel.addEventListener('open',()=>{clearTimeout(timer);resolve();},{once:true});});
     }catch{message('Using the compatible stream connection…');await connectSocket();}
-    await refresh();const free=roomState.slots.findIndex(s=>!s.name);if(free>=0){await api('claim',{slot:free});await refresh();}
+    // A rejoin already has its old slot back, if it was free. Otherwise take the first open one.
+    await refresh();const wanted=joined.wanted;
+    if(joined.slot==null&&(joined.token&&!('wanted' in joined)||typeof wanted==='number')){const free=roomState.slots.findIndex(s=>!s.name);if(free>=0){expectedMine=free;await api('claim',{slot:free});await refresh();}}
     $('join-panel').hidden=true;$('loading').hidden=true;$('sound').disabled=false;$('leave').disabled=false;connected(mine>=0?'Player '+(mine+1)+' connected':'Watching',true);
     $('screen').classList.add('playing');fitSideways();
-    message(mine===0?'You are Player 1. Use Enter / Start and Cross to navigate the original game.':mine>0?'You are Player '+(mine+1)+'. Wait for Player 1 to choose multiplayer.':'All player slots are occupied. You can watch the game.');
+    const taken=typeof wanted==='number'&&mine!==wanted?'Player '+(wanted+1)+' was taken. ':'';
+    message(taken+(mine===0?'You are Player 1. Use Enter / Start and Cross to navigate the original game.':mine>0?'You are Player '+(mine+1)+'. Wait for Player 1 to choose multiplayer.':'wanted' in joined&&wanted===null?'Welcome back. You are watching: choose an open slot to play.':'All player slots are occupied. You can watch the game.'));
     $('join').blur();focused=document.hasFocus();
-  }catch(error){await leaveRoom(false);message(error.message);}finally{joining=false;}
-});
+  }catch(error){await leaveRoom(false);message(error.message);}finally{$('rejoin-button').disabled=false;}
+}
+function roomMessage(data){
+  if(data.t==='pong')rtt=Math.round(performance.now()-data.sent);
+  else if(data.t==='mirror')mirrorReceive(data);
+  else if(data.t==='seats'||data.t==='removed')void refresh();  // a slot changed: look now, not at the next poll
+}
 $('leave').addEventListener('click',()=>leaveRoom());
+$('rejoin-button').addEventListener('click',()=>resume(true));
+$('rejoin-forget').addEventListener('click',forgetDevice);
+$('forget').addEventListener('click',()=>{if(confirm('Log out and forget this device? You will need the room code to join again.'))void forgetDevice();});
+$('admin-lock').addEventListener('click',async()=>{try{await api('admin/lock',{});message('Host controls locked on this device.');}catch(e){message(e.message);}await refresh();});
 $('change-game').addEventListener('click',()=>{clearInput();pickerOpen=true;library=null;renderGame();renderActivity();reportPicker();});
 $('boot-screen').addEventListener('change',()=>{bootChosen=true;});
 $('close-picker').addEventListener('click',()=>{pickerOpen=false;pickerTouched=0;renderGame();renderActivity();reportPicker();});
 $('stop-game').addEventListener('click',async()=>{if(!confirm('Stop '+roomState.host.game.title+' for everyone? Its memory card is saved.'))return;try{clearInput();await api('game/stop',{});pickerOpen=false;pickerTouched=0;}catch(e){message(e.message);}await refresh();});
 $('admin').addEventListener('submit',async event=>{event.preventDefault();try{await api('admin',{pin:$('admin-pin').value});$('admin-pin').value='';await refresh();}catch(e){message(e.message);}});
-$('spectate').addEventListener('click',async()=>{try{clearInput();await api('release',{});await refresh();message('You are watching. Choose an open slot to play.');}catch(e){message(e.message);}});
+$('spectate').addEventListener('click',async()=>{try{clearInput();expectedMine=-1;await api('release',{});await refresh();message('You are watching. Choose an open slot to play.');}catch(e){message(e.message);}});
 $('sound').addEventListener('click',async()=>{muted=!muted;rtcAudio.muted=muted;try{
   if(transport==='websocket'){
     if(!muted&&!audioContext){const Audio=window.AudioContext||window.webkitAudioContext;if(!Audio)throw new Error('Audio unavailable');audioContext=new Audio();audioGain=audioContext.createGain();audioGain.gain.value=.6;audioGain.connect(audioContext.destination);}
@@ -625,7 +708,7 @@ window.addEventListener('keydown',event=>{if(!isControlKey(event.code,analog)||e
 window.addEventListener('keyup',event=>{if(keys.delete(event.code)){event.preventDefault();sendInput();}});
 window.addEventListener('blur',()=>{focused=false;clearInput();});window.addEventListener('focus',()=>{focused=true;});
 document.addEventListener('visibilitychange',()=>{if(document.hidden)clearInput();});
-window.addEventListener('pagehide',()=>{clearInput();if(token)fetch('api/leave',{method:'POST',headers:{Authorization:'Bearer '+token,'Content-Type':'application/json'},body:'{}',keepalive:true}).catch(()=>{});});
+window.addEventListener('pagehide',()=>{clearInput();if(token)fetch('api/leave',{method:'POST',headers:{Authorization:'Bearer '+token,'Content-Type':'application/json'},body:'{"unload":true}',keepalive:true}).catch(()=>{});});
 window.addEventListener('gamepadconnected',updatePads);window.addEventListener('gamepaddisconnected',updatePads);
 $('gamepad').addEventListener('change',()=>{clearInput();updatePads();$('gamepad').blur();});
 // Pads with sticks: WASD/IJKL move the sticks, and the touch pad shows two thumbsticks.
@@ -660,4 +743,4 @@ setInterval(async()=>{
   $('stream-info').textContent=(transport==='webrtc'?'WebRTC':'Fallback')+' · '+streamFPS+' fps'+(rtt===null?'':' · '+rtt+' ms RTT');document.querySelector('.live').classList.toggle('active',streamFPS>0);renderDiagnostics();
 },2000);
 window.streamRoom={get state(){return roomState;},get pc(){return pc;},get frames(){return frames;},get player(){return mine+1;},get transport(){return transport;},get audioPackets(){return audioPackets;},get diagnostics(){return {receiverBufferMs,receivedToDisplayMs,rtt,emulationHz:roomState?.host.emulationHz,inputPollMs:roomState?.inputPollMs};}};
-renderSlots();updatePads();
+renderSlots();updatePads();void resume();

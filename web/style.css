@@ -243,3 +243,37 @@ main{padding:10px max(16px,env(safe-area-inset-right)) 0 max(16px,env(safe-area-
 .screen.immersive .touch-pad .stick span{left:20px;top:20px;width:48px;height:48px}
 .screen.immersive .touch-pad .stick{align-self:end}
 }
+
+/* Remembered devices and the host's seat controls. */
+.join-card .check{display:flex;gap:8px;align-items:center;margin-top:12px}
+.join-card .check input{width:auto;margin:0}
+.rejoin p{font-size:13px;line-height:1.6;margin:0}
+.rejoin #rejoin-forget{width:100%;margin-top:10px;background:transparent;font-size:11px}
+.seat-notice{position:absolute;top:14px;left:50%;transform:translateX(-50%);z-index:60;max-width:calc(100% - 28px);padding:12px 18px;border:2px solid var(--pc,var(--border));background:#0c1216f2;border-radius:4px;box-shadow:4px 4px 0 #0008;font-family:var(--pixel);font-size:15px;font-weight:700;color:var(--pc,var(--text));text-align:center;pointer-events:none}
+.seat-notice.p1,.roster li.p1{--pc:var(--p1)}.seat-notice.p2,.roster li.p2{--pc:var(--p2)}.seat-notice.p3,.roster li.p3{--pc:var(--p3)}.seat-notice.p4,.roster li.p4{--pc:var(--p4)}
+.manage{border-top:1px solid var(--border);margin-top:20px;padding-top:16px}
+.manage-heading{display:flex;justify-content:space-between;align-items:center;gap:8px}
+.manage-heading button{font-size:10px;padding:6px 9px}
+.manage .muted{margin:10px 0 12px}
+.roster{list-style:none;padding:0;margin:0;display:flex;flex-direction:column;gap:7px}
+.roster li{display:flex;flex-wrap:wrap;align-items:center;gap:6px;padding:8px 10px;border:1px solid var(--border);border-left:4px solid var(--pc,#62747b);background:var(--panel);border-radius:4px}
+.roster li>span{display:flex;flex-direction:column;gap:2px;flex:1 1 100%;min-width:0}
+.roster b{font-size:12px;overflow-wrap:anywhere}
+.roster small{font-size:10px;color:var(--pc,var(--muted));font-family:var(--pixel)}
+.roster select{flex:1;min-width:0;background:#0b1419;color:var(--text);padding:7px;border:1px solid var(--border);border-radius:5px;font-size:11px}
+.roster .kick{font-size:10px;padding:7px 9px;color:var(--p3);border-color:color-mix(in srgb,var(--p3) 45%,var(--border))}
+.device-note{font-size:10px;line-height:1.7;color:var(--muted);margin-top:14px}
+.device-note button{display:block;margin-top:8px;width:100%;background:transparent;font-size:10px}
+@media(max-width:700px),(pointer:coarse){
+.rejoin p{font-size:14px}
+.join-card .check{font-size:13px}
+.roster b{font-size:14px}
+.roster small,.device-note,.device-note button,.manage-heading button,.roster .kick,.rejoin #rejoin-forget{font-size:12px}
+.roster select{font-size:16px}
+.seat-notice{font-size:17px}
+}
+@media(pointer:coarse){
+.join-card .check{min-height:44px;margin-top:6px}
+.join-card .check input{width:22px;height:22px}
+.roster .kick,.manage-heading button{min-width:44px}
+}

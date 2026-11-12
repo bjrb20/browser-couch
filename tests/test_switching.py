@@ -343,7 +343,7 @@ class MirrorTests(IsolatedAsyncioTestCase):
         room.mirror_update(token, room.clients[token], dict(t='mirror', s=s))
 
     def seen(self, room, token):
-        return room.clients[token]['channel'].sent
+        return [m for m in room.clients[token]['channel'].sent if m['t'] == 'mirror']
 
     @staticmethod
     async def text(ws):
