@@ -154,6 +154,10 @@ function renderLibrary(){
       b.addEventListener('click',()=>pick(game,item));card.append(b);
       if(game.about?.description){const about=document.createElement('button');about.type='button';about.className='about';about.textContent='About';
         about.setAttribute('aria-label','About '+game.title);about.addEventListener('click',()=>showAbout(game));card.append(about);}
+      // PS2: four players on the multitap, or two pads for a game that reads no multitap. The host keeps the choice.
+      if(can&&typeof game.multitap==='boolean'){const tap=document.createElement('button');tap.type='button';tap.className='multitap';
+        tap.textContent=game.multitap?'Multitap: 4 players':'Multitap off: 2 players';tap.setAttribute('aria-pressed',String(game.multitap));
+        tap.setAttribute('aria-label','Multitap (4 players) for '+game.title);tap.disabled=busy;tap.addEventListener('click',()=>setMultitap(game,!game.multitap));card.append(tap);}
       if(can&&library.covers){
         const tools=document.createElement('div'),change=document.createElement('button');tools.className='cover-tools';
         change.type='button';change.textContent=game.cover?'Change cover':'Add cover';change.setAttribute('aria-label',change.textContent+' for '+game.title);
@@ -179,6 +183,10 @@ function renderLibrary(){
   if(mirrorShown||mirrorIn?.s)drawMirror();
   // While art is being fetched, look again every few seconds.
   if(!fetchPoll&&consoles.some(c=>c.games.some(g=>g.fetch?.state)))fetchPoll=setTimeout(()=>{fetchPoll=null;if(token&&library&&!$('game-picker').hidden)void loadLibrary(true);},3000);
+}
+async function setMultitap(game,on){
+  try{await api('game/multitap',{id:game.id,on});message(game.title+(on?' starts with the multitap: 4 players.':' starts with two pads, no multitap.'));}catch(e){message(e.message);}
+  await loadLibrary(true);
 }
 async function uploadCover(game,file){
   if(file.size>5*1024*1024){message('Use an image of at most 5 MB.');return;}

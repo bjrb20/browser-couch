@@ -16,7 +16,7 @@ from library import Game, Library
 from media import GameAudio
 import server
 from server import STARTED_FOR, Room, make_app
-from session import Launcher, Session
+from session import Launcher, Session, multitap_default
 
 from test_library import Host
 
@@ -53,12 +53,13 @@ class FakeLauncher(Launcher):
         super().__init__('system', 'saves', 'cores')
         self.log, self.kwargs, self.built = log, kwargs, []
 
-    def plan(self, game):
+    def plan(self, game, multitap=None):
+        self.planned = multitap
         return None, 2 if game.console == 'ps2' else 4, None
 
-    def emulator(self, game, hub, boot_screen=None):
+    def emulator(self, game, hub, boot_screen=None, multitap=None):
         self.built.append(hub.players)
-        self.boot = boot_screen
+        self.boot, self.multitap = boot_screen, multitap
         return FakeEmulator(self.log, game.title, **self.kwargs.get(game.title, {}))
 
 
@@ -156,6 +157,32 @@ class SwitchTests(IsolatedAsyncioTestCase):
         self.assertIs(self.launcher.boot, False)
         await client.post('/api/game', json=dict(id=self.ids['Demo'], bootScreen='yes'), headers=auth)
         self.assertIsNone(self.launcher.boot, 'anything else means the host default')
+
+    async def test_a_pick_chooses_the_multitap_for_the_slots_and_the_core(self):
+        demo, root = self.ids['Demo'], Path(self.temporary.name)
+        (root/'cores'/core_filename('Linux', 'pcsx2')).write_bytes(b'')  # PCSX2, not Play!
+        (root/'system/pcsx2/bios').mkdir(parents=True)
+        (root/'system/pcsx2/bios/console.bin').write_bytes(b'\0'*16)
+        room, client = await self.room(admin_pin='4321')
+        _, auth = await self.join(client)
+        listed = lambda body: {g['title']: g.get('multitap') for c in body['consoles'] for g in c['games']}
+        body = await (await client.get('/api/library', headers=auth)).json()
+        self.assertEqual(listed(body), {'Canyon Racer': None, 'Demo': True}, 'on with no details; PS1 has no choice')
+        response = await client.post('/api/game/multitap', json=dict(id=demo, on=False), headers=auth)
+        self.assertEqual(response.status, 403, 'it takes the right to choose games')
+        await client.post('/api/admin', json=dict(pin='4321'), headers=auth)
+        response = await client.post('/api/game/multitap', json=dict(id=demo, on=False), headers=auth)
+        self.assertEqual(response.status, 200)
+        body = await (await client.get('/api/library', headers=auth)).json()
+        self.assertEqual(listed(body)['Demo'], False)
+        await client.post('/api/game', json=dict(id=demo), headers=auth)
+        self.assertEqual((self.launcher.planned, self.launcher.multitap), (False, False), 'the choice is kept')
+        await client.post('/api/game', json=dict(id=demo, multitap=True), headers=auth)
+        self.assertEqual((self.launcher.planned, self.launcher.multitap), (True, True), 'a pick may still say')
+        for bad in (dict(id=self.ids['Canyon Racer'], on=True), dict(id=demo, on='no')):
+            self.assertEqual((await client.post('/api/game/multitap', json=bad, headers=auth)).status, 400)
+        await client.post('/api/game', json=dict(id=self.ids['Canyon Racer']), headers=auth)
+        self.assertIsNone(self.launcher.multitap, 'PS1 keeps its own')
 
     async def test_the_fallback_stream_announces_the_rate_it_sends(self):
         room, client = await self.room()
@@ -553,6 +580,22 @@ class LauncherTests(TestCase):
         self.assertEqual((core.name, players, multitap), (core_filename(core='pcsx2'), 4, 'port 1'))
         self.assertEqual(Launcher('s', 'saves', self.cores, 2).plan(self.game('ps2', 'ps2'))[1:], (2, 'disabled'))
         self.assertEqual(Launcher('s', 'saves', self.cores, 4).plan(self.game('ps2', 'ps2-play'))[1:], (2, None))
+
+    def test_the_pick_turns_the_ps2_multitap_on_or_off_and_leaves_ps1_alone(self):
+        launcher = Launcher('s', 'saves', self.cores)
+        self.assertEqual(launcher.plan(self.game('ps2', 'ps2'), True)[1:], (4, 'port 1'))
+        self.assertEqual(launcher.plan(self.game('ps2', 'ps2'), False)[1:], (2, 'disabled'))
+        self.assertEqual(launcher.plan(self.game('ps1', 'ps1'), False)[1:], (4, 'port 1'))
+        self.assertEqual(launcher.plan(self.game('ps2', 'ps2-play'), True)[1:], (2, None))
+        emulator = launcher.emulator(self.game('ps2', 'ps2'), InputHub(2), multitap=False)
+        self.assertEqual(emulator.variables['pcsx2_multitap'], b'disabled')
+        emulator = launcher.emulator(self.game('ps2', 'ps2'), InputHub(4), multitap=True)
+        self.assertEqual(emulator.variables['pcsx2_multitap'], b'port 1')
+
+    def test_the_multitap_starts_on_unless_the_game_is_for_two_players_at_most(self):
+        for players, on in [('1-4', True), ('1-3', True), ('2-8', True), ('4', True), ('1-2', False),
+                            ('2', False), ('1', False), ('', True), (None, True), ('many', True)]:
+            self.assertEqual(multitap_default(players), on, players)
 
     def test_each_game_saves_in_its_own_folder_and_ps2_cards_follow(self):
         launcher = Launcher('s', 'saves', self.cores)

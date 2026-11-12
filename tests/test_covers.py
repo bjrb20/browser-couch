@@ -315,3 +315,42 @@ class NowPlayingTests(IsolatedAsyncioTestCase):
                 response = await self.client.post('/api/game/about', headers=admin, json=body)
                 self.assertIn(response.status, (400, 404))
         self.assertFalse((self.host.root/'covers'/'edited').exists())
+
+
+class MultitapChoiceTests(IsolatedAsyncioTestCase):
+    """A PS2 game's multitap: on by default, off for a game for two at most, and the last choice kept."""
+    async def asyncSetUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.host = Host(self.temporary.name)
+        self.host.core('pcsx2')
+        self.host.bios('pcsx2/bios/console.bin')
+        for name in ('Duel', 'Party', 'Plain'):
+            self.host.file(f'ps2/{name}.iso')
+        self.library = Library(self.host.library, self.host.system, self.host.cores, 'Linux').scan()
+        self.covers = Covers(self.host.root/'covers', self.host.library)
+
+    async def room(self):
+        room = Room(Session(InputHub(4)), 'qa-canyon', library=self.library, covers=self.covers)
+        client = TestClient(TestServer(make_app(room)))
+        await client.start_server()
+        self.addAsyncCleanup(client.close)
+        joined = await (await client.post('/api/join', json=dict(pin='qa-canyon', name='Ann'))).json()
+        return client, dict(Authorization='Bearer '+joined['token'])
+
+    async def listed(self, client, auth):
+        body = await (await client.get('/api/library', headers=auth)).json()
+        return {game['title']: game['multitap'] for game in body['consoles'][0]['games']}
+
+    async def test_details_set_the_default_and_a_choice_wins_and_is_kept(self):
+        client, auth = await self.room()
+        ids = {game.name: game.id for game in self.library.games.values()}
+        self.covers.store_fetched(ids['Duel'], None, dict(sources=['test'], about=dict(players='1-2')))
+        self.covers.store_fetched(ids['Party'], None, dict(sources=['test'], about=dict(players='1-4')))
+        self.assertEqual(await self.listed(client, auth), dict(Duel=False, Party=True, Plain=True))
+        for title, on in (('Duel', True), ('Party', False)):
+            response = await client.post('/api/game/multitap', headers=auth, json=dict(id=ids[title], on=on))
+            self.assertEqual(response.status, 200)
+        self.assertEqual(await self.listed(client, auth), dict(Duel=True, Party=False, Plain=True))
+        client, auth = await self.room()  # a restarted host
+        self.assertEqual(await self.listed(client, auth), dict(Duel=True, Party=False, Plain=True))

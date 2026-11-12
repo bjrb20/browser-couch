@@ -537,8 +537,10 @@ instead of in one pair shared by every game. A `--disc` game still saves in
 `runtime/saves/`.
 
 PS1 and PS2 library games use four slots on a multitap in port 1, as with
-`--disc` (see "PS2" for games that read only two pads). `--players` and
-`--core-option` apply to every library game.
+`--disc`. Each PS2 game's card has a "Multitap" button for players who may
+choose games, so a game can start with two pads instead (see "PS2").
+`--players` and `--core-option` apply to every library game; for a PS2 game
+the card's choice decides the player count.
 
 Everyone in the room sees what the chooser is doing, in a strip below the
 stream that never covers it:
@@ -664,8 +666,9 @@ homebrew ELF:
 ./run.sh --console ps2 --disc ~/Games/game/GAME.iso --host 0.0.0.0
 ```
 
-PS2 rooms have four player slots, as PS1 rooms do. The keyboard, touch and gamepad
-buttons are the same as PS1. The gamepad sticks are the analog sticks. On the
+PS2 rooms have four player slots, as PS1 rooms do, or two with the multitap
+off (see below). The keyboard, touch and gamepad buttons are the same as
+PS1. The gamepad sticks are the analog sticks. On the
 keyboard, WASD and the arrows move the sticks, and TFGH is the D-pad. Use
 `--core-option KEY=VALUE` to change a core option, for example
 `--core-option pcsx2_renderer=OpenGL` on a Linux host with a GPU.
@@ -678,8 +681,19 @@ October 2026; an older download reads two pads and stops with a message. Run
 Player 1 is the multitap's first slot, which every game reads. Players 2 to 4
 are its other slots, so only games that support the multitap see them. A game
 that reads only two pads sees player 1 alone, and its two-player modes can be
-greyed out. `--players 2` puts player 2 in console port 2 for such a game, but
-it applies to every game the host starts.
+greyed out. For such a game, press its card's "Multitap" button before picking
+it, so it reads "Multitap off: 2 players": the game then starts with two
+slots, on console ports 1 and 2. Only players who may choose games see the
+button.
+
+- **The default.** On, unless the game's details give a number of players of
+  two at most (for example "1-2"); a game with no details starts on. Fetch
+  the details with a provider that gives players, such as IGDB.
+- **The choice is kept.** Pressing the button saves the choice for that game
+  in `--covers DIR/multitap/<game id>.json`, so it outlasts a restart; it
+  always wins over the default. Without a covers folder the host keeps it
+  until it stops.
+- It applies to library games only; with `--disc`, use `--players 2`.
 
 Platform notes:
 

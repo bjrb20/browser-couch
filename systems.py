@@ -14,6 +14,7 @@ class Profile:
     variables: dict = field(default_factory=dict)
     multitap: str = ''  # core option that selects the multitap, if the console has one
     multitaps: tuple = ()
+    multitap_choice: bool = False  # the picker offers a per-game choice: four players on the multitap, or two pads
     bios: str = ''  # directory inside runtime/system that must hold a BIOS dump
     bios_hint: str = ''
     bios_required: bool = False
@@ -92,8 +93,10 @@ PROFILES = {profile.key: profile for profile in (
             'pcsx2_fastboot': 'enabled',
         },
         # Players 1-4 are the four slots of a multitap in console port 1. A game
-        # that reads only two pads then sees player 1 alone.
+        # that reads only two pads then sees player 1 alone, so the picker can
+        # start a game without it: two players, on console ports 1 and 2.
         multitap='pcsx2_multitap', multitaps=('port 1', 'disabled', 'port 2', 'ports 1 and 2'),
+        multitap_choice=True,
         bios='pcsx2/bios', bios_required=True,
         library='ps2', extensions=('.iso', '.chd', '.cso', '.cue', '.elf'),
         # Memory cards in the game's own save folder, not one pair shared by every game.

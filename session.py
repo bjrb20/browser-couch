@@ -4,6 +4,7 @@ The room, its players and their slots outlive any one game, so a host can
 start with no game and pick one later, and switch games without a restart.
 """
 import asyncio
+import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -20,6 +21,15 @@ IDLE_FRAME[:] = (12, 18, 22)
 IDLE_RATE = 48000  # the Opus rate: a room that starts idle resamples only 44.1 kHz games
 
 
+def multitap_default(players):
+    """Whether a game starts on the multitap, from its number of players such as '1-4'.
+
+    On for three or more, off for two at most, and on when nothing says.
+    """
+    counts = [int(count) for count in re.findall(r'\d+', players or '')]
+    return not counts or max(counts) >= 3
+
+
 @dataclass
 class Launcher:
     """How the host builds an emulator for a library game."""
@@ -30,10 +40,16 @@ class Launcher:
     options: tuple = ()  # --core-option KEY=VALUE, for every console
     boot_screen: bool = True  # --no-boot-screen; a pick can still choose either
 
-    def plan(self, game):
-        """Core path, players and multitap for a game."""
+    def plan(self, game, multitap=None):
+        """Core path, players and multitap for a game.
+
+        `multitap` is the picker's choice for the game: True for four players on the multitap,
+        False for two pads. Only consoles whose profile offers the choice follow it.
+        """
         profile = PROFILES[game.profile]
         players = min(self.players or profile.default_players, profile.max_players)
+        if profile.multitap_choice and isinstance(multitap, bool):
+            players = profile.max_players if multitap else 2
         multitap = ('port 1' if players > 2 else 'disabled') if profile.multitap else None
         return Path(self.cores)/core_filename(core=profile.core), players, multitap
 
@@ -46,9 +62,9 @@ class Launcher:
         wanted = self.boot_screen if boot_screen is None else boot_screen
         return PROFILES[game.profile].boot_screen(self.system) if wanted else ()
 
-    def emulator(self, game, hub, boot_screen=None):
+    def emulator(self, game, hub, boot_screen=None, multitap=None):
         """Build (not start) the game's emulator. Resize the hub first: the emulator reads its slot count."""
-        core, players, multitap = self.plan(game)
+        core, players, multitap = self.plan(game, multitap)
         profile = PROFILES[game.profile]
         boot = self.boot_options(game, boot_screen)
         # --core-option comes last, so the host can still override any of these.

@@ -205,6 +205,21 @@ class Covers:
             self.fetched(game_id, suffix).unlink(missing_ok=True)
         self.records.pop(game_id, None)
 
+    def multitap(self, game_id):
+        """The multitap choice an admin last made for the game: True, False, or None for none yet."""
+        path = self.root/'multitap'/f'{checked_id(game_id)}.json' if self.root else None
+        try:
+            chosen = json.loads(path.read_text()) if path and path.is_file() else None
+        except (OSError, ValueError):
+            return None
+        return chosen if isinstance(chosen, bool) else None
+
+    def save_multitap(self, game_id, on):
+        """Remember the game's multitap choice, so the next pick starts with it."""
+        if not self.root:
+            raise OSError('No covers folder')
+        self._write(self.root/'multitap'/f'{checked_id(game_id)}.json', json.dumps(bool(on)).encode())
+
     def sidecar(self, game):
         """cover.jpg or cover.png in the game's own folder, not one the console's games share."""
         folder = game.path.parent

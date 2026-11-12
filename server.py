@@ -31,7 +31,7 @@ from inputs import InputHub
 from library import Library
 import metadata
 from media import GameAudio, GameVideo
-from session import Launcher, Session
+from session import Launcher, Session, multitap_default
 from systems import PROFILES
 import tracer
 
@@ -109,6 +109,7 @@ class Room:
         self.library = library
         self.launcher = launcher
         self.admin_pin = admin_pin
+        self.multitaps = {}  # game id -> multitap choice, when there is no covers folder to keep it in
         self.scanned_at = None
         self.scan_lock = asyncio.Lock()
         self.session = session
@@ -364,6 +365,9 @@ class Room:
 
         def item(entry):
             game = games.get(entry['id'])
+            multitap = self.multitap(game) if game else None
+            if multitap is not None:
+                entry = dict(entry, multitap=multitap)
             if not self.covers or not game:
                 return dict(entry, cover=None)
             record = self.covers.record(game.id) or {}
@@ -379,6 +383,35 @@ class Room:
             return entry
         return dict(listing, consoles=[dict(console, games=[item(entry) for entry in console['games']])
                                        for console in listing['consoles']])
+
+    def multitap(self, game):
+        """Whether the game starts on the multitap, or None for a console with no choice.
+
+        The choice last made for the game, else on unless its details say two players at most.
+        """
+        if not PROFILES[game.profile].multitap_choice:
+            return None
+        stored = self.covers and self.covers.root
+        chosen = self.covers.multitap(game.id) if stored else self.multitaps.get(game.id)
+        if chosen is not None:
+            return chosen
+        about = self.covers.about(game.id)[0] if self.covers else {}
+        return multitap_default(about.get('players'))
+
+    async def multitap_choice(self, request):
+        """Turn a game's multitap on or off for its next start. It takes the right to choose games."""
+        self.picker_rights(request)
+        body = await request.json()
+        game = self.library.games.get(body.get('id')) if isinstance(body, dict) else None
+        if not game:
+            raise web.HTTPNotFound(text='That game is no longer in the library')
+        if not PROFILES[game.profile].multitap_choice or not isinstance(body.get('on'), bool):
+            raise web.HTTPBadRequest(text='This game has no multitap choice')
+        if self.covers and self.covers.root:
+            await asyncio.to_thread(self.covers.save_multitap, game.id, body['on'])
+        else:
+            self.multitaps[game.id] = body['on']
+        return web.json_response(dict(ok=True, multitap=body['on']))
 
     def cover_game(self, game_id):
         game = self.library.games.get(game_id) if self.library and isinstance(game_id, str) else None
@@ -525,12 +558,15 @@ class Room:
         client['admin'] = True
         return web.json_response(dict(ok=True))
 
-    def picker(self, request):
+    def picker_rights(self, request):
         _, client = self.authenticate(request)
         if not self.library:
             raise web.HTTPNotFound(text='This host has no game library')
         if not self.can_pick(client):
             raise web.HTTPForbidden(text='Enter the PIN to choose games')
+
+    def picker(self, request):
+        self.picker_rights(request)
         if self.session.lock.locked():
             raise web.HTTPConflict(text='A game is starting. Wait a moment.')
 
@@ -556,12 +592,14 @@ class Room:
                                game=dict(id=game.id, title=game.name, console=game.console,
                                          cover=cover['version'] if cover else None))
             await self.session.unload()
-            _, players, _ = self.launcher.plan(game)
+            tap = body.get('multitap')
+            tap = tap if isinstance(tap, bool) else await asyncio.to_thread(self.multitap, game)
+            _, players, _ = self.launcher.plan(game, tap)
             self.hub.resize(players)
             try:
                 boot = body.get('bootScreen')
                 boot = boot if isinstance(boot, bool) else None
-                emulator = self.launcher.emulator(game, self.hub, boot)
+                emulator = self.launcher.emulator(game, self.hub, boot, tap)
                 await self.session.load(emulator, game.name, game.id)
             except RuntimeError as error:
                 print(error, flush=True)
@@ -882,7 +920,7 @@ def make_app(room, trusted_proxies=()):
                            ('game', room.pick), ('game/stop', room.unpick), ('cover', room.cover_upload),
                            ('cover/remove', room.cover_remove), ('cover/fetch', room.cover_fetch),
                            ('game/about', room.about_edit), ('game/match', room.match),
-                           ('picker', room.choose)]:
+                           ('game/multitap', room.multitap_choice), ('picker', room.choose)]:
         app.router.add_post('/api/' + route, handler)
     app.router.add_get('/api/state', room.state)
     app.router.add_get('/api/library', room.games)
