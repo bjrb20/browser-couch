@@ -4,6 +4,7 @@ The room, its players and their slots outlive any one game, so a host can
 start with no game and pick one later, and switch games without a restart.
 """
 import asyncio
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -62,6 +63,7 @@ class Session:
         self.emulator = emulator
         self.title = title
         self.game_id = None
+        self.started_at = time.monotonic() if emulator else None  # when the running game started
         self.loading = None  # the title of a game that is starting
         self.error = None  # why the last game could not start
         self.lock = asyncio.Lock()
@@ -105,6 +107,7 @@ class Session:
         finally:
             self.loading = None
         self.emulator, self.title, self.game_id = emulator, title, game_id
+        self.started_at = time.monotonic()
 
     def status(self):
         if not self.emulator:
@@ -112,4 +115,6 @@ class Session:
                         audioRate=IDLE_RATE, error=self.error, emulationHz=None, emulationWorkMs=None,
                         audioQueueMs=0, system=None, console=None, pad=None, analog=False, renderer=None,
                         multitap='none')
-        return dict(self.emulator.status(), game=dict(title=self.title, id=self.game_id), loading=None)
+        running = round(time.monotonic()-self.started_at)
+        return dict(self.emulator.status(), game=dict(title=self.title, id=self.game_id, runningS=running),
+                    loading=None)

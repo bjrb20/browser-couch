@@ -100,7 +100,7 @@ class SwitchTests(IsolatedAsyncioTestCase):
         response = await client.post('/api/game', json=dict(id=self.ids['Canyon Racer']), headers=auth)
         self.assertEqual(response.status, 200)
         state = await (await client.get('/api/state', headers=auth)).json()
-        self.assertEqual(state['host']['game'], dict(title='Canyon Racer', id=self.ids['Canyon Racer']))
+        self.assertEqual(state['host']['game'], dict(title='Canyon Racer', id=self.ids['Canyon Racer'], runningS=0))
         self.assertTrue(state['canPick'])
 
         # PS2 reads two pads: Bob's slot 4 goes, Ann keeps slot 1.

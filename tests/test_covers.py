@@ -243,3 +243,75 @@ class CoverApiTests(IsolatedAsyncioTestCase):
     async def test_page_may_show_blob_images(self):
         response = await self.client.get('/')
         self.assertIn("img-src 'self' data: blob:", response.headers['Content-Security-Policy'])
+
+
+class EditTests(TestCase):
+    def test_edits_are_cleaned_and_capped(self):
+        self.assertEqual(covers.checked_edits(dict(description=' A  quiet\r\n\n\n\ngame.‮\x00 ', year='1999',
+                                                   genre='Puzzle\nAction\t')),
+                         dict(description='A quiet\n\ngame.', year='1999', genre='Puzzle Action'))
+        self.assertEqual(covers.checked_edits(dict(year='')), dict(year=''))
+        for bad in (dict(year='99'), dict(year='3001'), dict(genre='x'*61), dict(description='x'*2001),
+                    dict(publisher='Someone'), dict(genre=5), {}, ['description'], dict(description='x'*9000)):
+            with self.subTest(bad=str(bad)[:40]), self.assertRaises(ValueError):
+                covers.checked_edits(bad)
+
+
+class NowPlayingTests(IsolatedAsyncioTestCase):
+    asyncSetUp, join, games = CoverApiTests.asyncSetUp, CoverApiTests.join, CoverApiTests.games
+
+    async def playing(self, auth):
+        response = await self.client.get('/api/playing', headers=auth)
+        self.assertEqual(response.status, 200)
+        return await response.json()
+
+    async def start(self, title):
+        games, _ = await self.games(await self.join())
+        self.room.session.game_id = games[title]['id']
+        return games[title]['id']
+
+    async def test_nothing_running(self):
+        self.assertEqual((await self.client.get('/api/playing')).status, 401)
+        self.assertIsNone((await self.playing(await self.join()))['game'])
+
+    async def test_running_game_with_only_a_cover_title_and_console(self):
+        racer = await self.start('Racer')
+        body = await self.playing(await self.join())
+        self.assertEqual(body['game'], dict(id=racer, title='Racer', console='PS1', consoleId='ps1',
+                                            cover=body['game']['cover'], about={}, edited=[]))
+        self.assertIsNotNone(body['game']['cover'])
+        self.assertFalse(body['canEdit'])
+        self.assertNotIn(self.temporary.name, str(body))
+        self.assertTrue((await self.playing(await self.join(admin=True)))['canEdit'])
+
+    async def test_admin_edits_win_over_fetched_details_and_survive_a_fetch(self):
+        puzzle = await self.start('Puzzle')
+        found = dict(description='Found text.', year='1999', genre='Puzzle', players='1-2', publisher='Pub Co')
+        self.room.covers.store_fetched(puzzle, None, dict(sources=['test'], about=found))
+        auth, admin = await self.join(), await self.join(admin=True)
+        self.assertEqual((await self.playing(auth))['game']['about'], found)
+        response = await self.client.post('/api/game/about', headers=auth, json=dict(id=puzzle, description='Mine'))
+        self.assertEqual(response.status, 403)
+        response = await self.client.post('/api/game/about', headers=admin,
+                                          json=dict(id=puzzle, description='<b>Mine</b>', genre='Logic'))
+        self.assertEqual(response.status, 200, await response.text())
+        # A fetch again replaces the provider's details but never the admin's.
+        self.room.covers.store_fetched(puzzle, None, dict(sources=['test'], about=dict(found, year='2001')))
+        game = (await self.playing(auth))['game']
+        self.assertEqual(game['about'], dict(found, description='<b>Mine</b>', genre='Logic', year='2001'))
+        self.assertEqual(game['edited'], ['description', 'genre'])
+        games, _ = await self.games(auth)
+        self.assertEqual(games['Puzzle']['about']['genre'], 'Logic', 'the card shows the edit too')
+        await self.client.post('/api/game/about', headers=admin, json=dict(id=puzzle, genre=''))
+        game = (await self.playing(auth))['game']
+        self.assertEqual((game['about']['genre'], game['edited']), ('Puzzle', ['description']))
+
+    async def test_bad_edits_are_refused(self):
+        puzzle = await self.start('Puzzle')
+        admin = await self.join(admin=True)
+        for body in (dict(id=puzzle, year='next year'), dict(id=puzzle, description='x'*2001),
+                     dict(id=puzzle, players='8'), dict(id='../ps1', genre='x'), dict(id=puzzle), [puzzle]):
+            with self.subTest(body=str(body)[:40]):
+                response = await self.client.post('/api/game/about', headers=admin, json=body)
+                self.assertIn(response.status, (400, 404))
+        self.assertFalse((self.host.root/'covers'/'edited').exists())

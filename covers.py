@@ -7,6 +7,9 @@ Three sources, checked in this order:
   the game's details in fetched/<game id>.json. Fetching never touches the
   other two, so a cover a person chose always wins.
 
+An admin's own description, year or genre is kept apart in edited/<game id>.json
+and wins over a provider's, which fetching never changes.
+
 Every image is decoded and re-encoded here before a browser sees it: JPEG,
 PNG or WebP by content, at most MAX_SIZE on each side, as a JPEG with no
 metadata. Browsers only ever name a game id, never a path.
@@ -19,6 +22,7 @@ import os
 from pathlib import Path
 import re
 import secrets
+import unicodedata
 
 from PIL import Image, ImageOps
 
@@ -29,6 +33,10 @@ FORMATS = ('JPEG', 'PNG', 'WEBP')
 SIDECARS = ('cover.jpg', 'cover.jpeg', 'cover.png')
 GAME_ID = re.compile(r'[0-9a-f]{16}')
 BACKGROUND = (12, 18, 22)  # the page background, under transparent pixels
+# A game's details, all optional and plain text. Admins may set the first three by hand.
+FIELDS = ('description', 'year', 'genre', 'players', 'publisher')
+EDITABLE = dict(description=2000, year=4, genre=60)  # field -> most characters
+YEAR = re.compile(r'(19[4-9]\d|20\d\d)')
 
 
 class BadImage(ValueError):
@@ -69,6 +77,39 @@ def encode(data, limit=MAX_UPLOAD):
     return out.getvalue()
 
 
+def plain(text, limit, lines=False):
+    """Text with no control or formatting characters, spaces collapsed; newlines kept only if `lines`."""
+    text = unicodedata.normalize('NFC', text)
+    text = ''.join(char if char == '\n' and lines or unicodedata.category(char)[0] != 'C' else ' '
+                   for char in text.replace('\r\n', '\n'))
+    rows = [' '.join(row.split()) for row in text.split('\n')]
+    text = re.sub(r'\n{3,}', '\n\n', '\n'.join(rows)).strip()
+    if len(text) > limit:
+        raise ValueError(f'Use at most {limit} characters')
+    return text
+
+
+def checked_edits(body):
+    """An admin's {field: text} for EDITABLE fields, cleaned. An empty text undoes that edit.
+
+    Raises ValueError with a message that is safe to show a browser.
+    """
+    if not isinstance(body, dict) or not body or set(body) - set(EDITABLE):
+        raise ValueError('Send the description, year or genre')
+    edits = {}
+    for key, value in body.items():
+        if not isinstance(value, str) or len(value) > EDITABLE[key]*2:
+            raise ValueError(f'The {key} is too long')
+        try:
+            value = plain(value, EDITABLE[key], lines=key == 'description')
+        except ValueError as error:
+            raise ValueError(f'The {key}: {str(error).lower()}') from None
+        if key == 'year' and value and not YEAR.fullmatch(value):
+            raise ValueError('The year should look like 1998')
+        edits[key] = value
+    return edits
+
+
 def checked_id(game_id):
     if not isinstance(game_id, str) or not GAME_ID.fullmatch(game_id):
         raise ValueError('Not a game id')
@@ -107,6 +148,33 @@ class Covers:
             return None
         self.records[game_id] = (stat.st_mtime_ns, record)
         return record
+
+    def edits(self, game_id):
+        """An admin's own {field: text} for the game, or {}."""
+        path = self.root/'edited'/f'{checked_id(game_id)}.json' if self.root else None
+        try:
+            edits = json.loads(path.read_text()) if path and path.is_file() else {}
+        except (OSError, ValueError):
+            return {}
+        return {key: value for key, value in edits.items() if key in EDITABLE and isinstance(value, str) and value} \
+            if isinstance(edits, dict) else {}
+
+    def save_edits(self, game_id, changes):
+        """Merge `changes` from checked_edits() into the game's edits: empty text removes that edit."""
+        if not self.root:
+            raise OSError('No covers folder')
+        edits = dict(self.edits(game_id), **changes)
+        self._write(self.root/'edited'/f'{checked_id(game_id)}.json',
+                    json.dumps({key: value for key, value in edits.items() if value}).encode())
+        return self.about(game_id)
+
+    def about(self, game_id):
+        """({field: text}, [edited fields]): the admin's edits over what a provider found."""
+        record = self.record(game_id) or {}
+        found = record.get('about') if isinstance(record.get('about'), dict) else {}
+        about = {key: found[key] for key in FIELDS if isinstance(found.get(key), str) and found[key]}
+        edits = self.edits(game_id)
+        return dict(about, **edits), sorted(edits)
 
     def sidecar(self, game):
         """cover.jpg or cover.png in the game's own folder, not one the console's games share."""

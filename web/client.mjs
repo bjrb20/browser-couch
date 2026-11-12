@@ -59,7 +59,7 @@ function renderSlots(){
 // "Change game" opens the same list over a running game. Browsers only ever get titles, ids and covers.
 let pickerOpen=false,library=null,libraryAt=0,picking=false,pickerDrawn='',bootChosen=false,consoleFilter='all',coverFor=null,fetchPoll=null;
 const coverURLs=new Map(),coverQueue=[];let coverLoads=0;
-async function loadLibrary(force=false){if(force||!library||performance.now()-libraryAt>15000){libraryAt=performance.now();try{const fresh=await api('library');if(!bootChosen)$('boot-screen').checked=fresh.bootScreen;library=fresh;}catch(e){message(e.message);}}renderLibrary();}
+async function loadLibrary(force=false){if(force)nowAt=0;if(force||!library||performance.now()-libraryAt>15000){libraryAt=performance.now();try{const fresh=await api('library');if(!bootChosen)$('boot-screen').checked=fresh.bootScreen;library=fresh;}catch(e){message(e.message);}}renderLibrary();}
 // Covers need the room token, which an <img src> cannot send: fetch them and show blob URLs, a few at a time.
 function coverKey(game){return game.id+':'+game.cover.version;}
 function showCover(game){const url=coverURLs.get(coverKey(game));if(!url)return;for(const art of document.querySelectorAll(`#library [data-art="${game.id}"]`)){if(art.querySelector('img')?.src===url)continue;const img=new Image();img.alt='';img.src=url;art.replaceChildren(img);art.classList.remove('placeholder');}}
@@ -204,9 +204,61 @@ function renderGame(){
   $('change-game').hidden=!token||!game||!roomState?.canPick&&!roomState?.adminPin;$('game-picker').hidden=!show;$('screen').classList.toggle('picking',show);
   if(show)void loadLibrary();
 }
+// Now playing: the running game's cover, title, console, time and players, plus any details it has.
+// Everything is drawn with textContent; the host checks the admin right and the lengths again.
+const phone=matchMedia('(max-width:700px)');
+let now=null,nowAt=0,nowLoading=false,nowStarted=0,nowShown=null,nowArt={key:'',url:null};
+const NOW_FACTS=[['year','Released'],['genre','Genre'],['players','Players'],['publisher','Publisher']];
+function runningFor(ms){const m=Math.floor(ms/60000);return m<1?'just started':m<60?m+' min':Math.floor(m/60)+' h '+String(m%60).padStart(2,'0')+' min';}
+function nowArtwork(game){
+  const art=$('np-art'),key=game.cover?game.id+':'+game.cover.version:'none:'+game.id;
+  if(key===nowArt.key)return;nowArt.key=key;if(nowArt.url){URL.revokeObjectURL(nowArt.url);nowArt.url=null;}
+  const fallback=()=>{const c=document.createElement('b');c.textContent=game.consoleId.toUpperCase();art.className='np-art placeholder';art.dataset.console=game.consoleId;art.replaceChildren(c);};
+  fallback();if(!game.cover)return;
+  fetch('api/cover?id='+encodeURIComponent(game.id),{headers:{Authorization:'Bearer '+token}}).then(async r=>{if(!r.ok||nowArt.key!==key)return;
+    const url=URL.createObjectURL(await r.blob());if(nowArt.key!==key){URL.revokeObjectURL(url);return;}nowArt.url=url;
+    const back=new Image(),front=new Image();back.alt=front.alt='';back.className='np-back';back.src=front.src=url;art.className='np-art';art.replaceChildren(back,front);
+  }).catch(()=>{});
+}
+function drawNowPlaying(){
+  const game=now?.game;if(!game)return;
+  $('np-title').textContent=game.title;$('np-short').textContent=game.title;$('np-console').textContent=game.console;
+  const facts=NOW_FACTS.filter(([key])=>game.about?.[key]).map(([key,label])=>{const row=document.createElement('div'),dt=document.createElement('dt'),dd=document.createElement('dd');dt.textContent=label;dd.textContent=game.about[key];row.append(dt,dd);return row;});
+  $('np-facts').replaceChildren(...facts);$('np-facts').hidden=!facts.length;
+  $('np-description').textContent=game.about?.description||'';$('np-description').hidden=!game.about?.description;
+  $('np-edit').hidden=!now.canEdit||!$('np-form').hidden;nowArtwork(game);
+}
+async function loadNowPlaying(){
+  if(nowLoading||!token)return;nowLoading=true;nowAt=performance.now();
+  try{const fresh=await api('playing');if(fresh.game&&fresh.game.id===roomState?.host.game?.id){now=fresh;drawNowPlaying();}}catch{}finally{nowLoading=false;}
+}
+function renderNowPlaying(){
+  const running=token?roomState?.host.game:null,panel=$('now-playing');
+  if(!running?.id){if(nowShown){panel.hidden=true;$('np-form').hidden=true;now=null;nowShown=null;nowArt.key='';if(nowArt.url)URL.revokeObjectURL(nowArt.url);nowArt.url=null;}return;}
+  const started=performance.now()-running.runningS*1000;
+  if(running.id!==nowShown){nowShown=running.id;now=null;nowStarted=started;$('np-form').hidden=true;
+    // A new game: the title at once, the rest when it loads. Folded on a phone, so the touch controls stay in view.
+    $('np-title').textContent=$('np-short').textContent=running.title;$('np-facts').replaceChildren();$('np-description').textContent='';$('np-edit').hidden=true;
+    if(panel.hidden&&phone.matches)panel.open=false;panel.hidden=false;void loadNowPlaying();}
+  else if(Math.abs(started-nowStarted)>3000)nowStarted=started;
+  else if(performance.now()-nowAt>20000)void loadNowPlaying();
+  $('np-running').textContent='running '+runningFor(performance.now()-nowStarted);
+  const players=(roomState.slots||[]).filter(s=>s.name).map(s=>{const li=document.createElement('li'),b=document.createElement('b'),name=document.createElement('span');li.className='p'+((s.number-1)%4+1);b.textContent='P'+s.number;name.textContent=s.name+(s.yours?' (you)':'');li.append(b,name);return li;});
+  if(!players.length){const li=document.createElement('li');li.className='np-none';li.textContent='No one has a controller yet';players.push(li);}
+  $('np-players').replaceChildren(...players);
+}
+$('np-edit').addEventListener('click',()=>{const about=now?.game?.about||{};$('np-edit-description').value=about.description||'';$('np-edit-year').value=about.year||'';$('np-edit-genre').value=about.genre||'';$('np-form').hidden=false;$('np-edit').hidden=true;$('now-playing').open=true;$('np-edit-description').focus();});
+$('np-cancel').addEventListener('click',()=>{$('np-form').hidden=true;drawNowPlaying();$('np-edit').focus();});
+$('np-form').addEventListener('submit',async event=>{
+  event.preventDefault();const game=now?.game;if(!game)return;
+  // Only what changed: an untouched fetched value stays the provider's, and an emptied field goes back to it.
+  const changes={};for(const key of ['description','year','genre']){const value=$('np-edit-'+key).value.trim();if(value!==(game.about?.[key]||'')||value===''&&game.edited.includes(key))changes[key]=value;}
+  if(!Object.keys(changes).length){$('np-form').hidden=true;drawNowPlaying();return;}
+  try{const r=await api('game/about',{id:game.id,...changes});game.about=r.about;game.edited=r.edited;$('np-form').hidden=true;drawNowPlaying();message('Details saved for '+game.title+'.');libraryAt=0;}catch(e){message(e.message);}
+});
 async function refresh(){
   if(!token||polling)return;polling=true;
-  try{roomState=await api('state');renderSlots();renderGame();const hz=roomState.host.emulationHz;$('host-info').textContent=!roomState.host.game?'No game loaded':roomState.host.core+' · '+(Number.isFinite(hz)?Math.round(hz)+'/':'')+roomState.host.fps+' Hz game'+(roomState.host.multitap==='none'?'':' · '+roomState.host.multitap+' multitap');if(roomState.host.console){$('pad-label').textContent='KEYBOARD → '+roomState.host.pad.toUpperCase();setAnalog(!!roomState.host.analog);$('game-label').textContent='ORIGINAL '+roomState.host.console+' GAME · BROWSER STREAMING';}if(roomState.host.error&&roomState.host.game)message('The emulator stopped: '+roomState.host.error);renderDiagnostics();}
+  try{roomState=await api('state');renderSlots();renderGame();renderNowPlaying();const hz=roomState.host.emulationHz;$('host-info').textContent=!roomState.host.game?'No game loaded':roomState.host.core+' · '+(Number.isFinite(hz)?Math.round(hz)+'/':'')+roomState.host.fps+' Hz game'+(roomState.host.multitap==='none'?'':' · '+roomState.host.multitap+' multitap');if(roomState.host.console){$('pad-label').textContent='KEYBOARD → '+roomState.host.pad.toUpperCase();setAnalog(!!roomState.host.analog);$('game-label').textContent='ORIGINAL '+roomState.host.console+' GAME · BROWSER STREAMING';}if(roomState.host.error&&roomState.host.game)message('The emulator stopped: '+roomState.host.error);renderDiagnostics();}
   catch(e){message(e.message);}finally{polling=false;}
 }
 async function leaveRoom(notify=true){
@@ -219,7 +271,7 @@ async function leaveRoom(notify=true){
   incoming.getTracks().forEach(t=>{t.stop();incoming.removeTrack(t);});video.srcObject=null;
   incomingAudio.getTracks().forEach(t=>{t.stop();incomingAudio.removeTrack(t);});rtcAudio.srcObject=null;rtcAudio.muted=true;
   lastSentMask=null;lastSentAt=0;receiverBufferMs=null;receivedToDisplayMs=null;previousJitter=null;
-  pickerOpen=false;library=null;bootChosen=false;$('change-game').hidden=true;
+  pickerOpen=false;library=null;bootChosen=false;$('change-game').hidden=true;renderNowPlaying();
   $('join-panel').hidden=false;$('game-picker').hidden=true;$('loading').hidden=true;$('join').disabled=false;$('sound').disabled=true;$('leave').disabled=true;
   $('screen').classList.remove('playing');
   $('stream-info').textContent='Waiting for a stream';document.querySelector('.live').classList.remove('active');connected('Not connected');renderSlots();

@@ -37,6 +37,24 @@
     <section class="touch-pad" id="touch-pad" aria-label="Touch controller"><div class="top-row"><div class="shoulders left"><button data-button="12">L2</button><button data-button="10">L1</button></div><div class="center"><button data-button="2" class="start">SELECT</button><button data-button="3" class="start">START</button></div><div class="shoulders right"><button data-button="11">R1</button><button data-button="13">R2</button></div></div><button id="exit-fullscreen" class="exit-fullscreen" aria-label="Exit fullscreen">✕</button><div class="stick left" data-stick="0" aria-label="Left stick"><span></span></div><div class="stick right" data-stick="1" aria-label="Right stick"><span></span></div><div class="dpad"><button data-button="4" aria-label="Up">↑</button><button data-button="6" aria-label="Left">←</button><button data-button="5" aria-label="Down">↓</button><button data-button="7" aria-label="Right">→</button></div><div class="face-buttons"><button data-button="1" aria-label="Square">□</button><button data-button="0" aria-label="Cross">✕</button><button data-button="8" aria-label="Circle">○</button><button data-button="9" aria-label="Triangle">△</button></div></section>
       </section>
       <aside>
+        <details id="now-playing" class="now-playing" open hidden>
+          <summary><span class="eyebrow">NOW PLAYING</span><span id="np-short" class="np-short"></span></summary>
+          <div id="np-art" class="np-art" aria-hidden="true"></div>
+          <div class="np-body">
+            <h2 id="np-title"></h2>
+            <p class="np-line"><span id="np-console"></span> · <span id="np-running"></span></p>
+            <dl id="np-facts" class="np-facts"></dl>
+            <p id="np-description" class="np-description"></p>
+            <ul id="np-players" class="np-players" aria-label="Players"></ul>
+            <button id="np-edit" type="button" hidden>Edit details</button>
+            <form id="np-form" class="np-form" hidden>
+              <label>Description<textarea id="np-edit-description" rows="5" maxlength="2000"></textarea></label>
+              <div class="np-pair"><label>Year<input id="np-edit-year" inputmode="numeric" maxlength="4" pattern="(19[4-9][0-9]|20[0-9][0-9])" placeholder="1998" autocomplete="off"></label><label>Genre<input id="np-edit-genre" maxlength="60" autocomplete="off"></label></div>
+              <p class="np-hint">Leave a field empty to show the fetched one, if any.</p>
+              <div class="np-actions"><button type="submit" class="np-save">Save</button><button id="np-cancel" type="button">Cancel</button></div>
+            </form>
+          </div>
+        </details>
         <div class="roster-heading"><h2>The starting grid</h2><span id="viewer-count">0 in room</span></div>
         <p class="muted">Choose one player slot. Everyone sees the same live game.</p>
         <div id="slots" class="slots"></div>

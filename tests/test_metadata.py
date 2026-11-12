@@ -56,6 +56,7 @@ def jeu(**extra):
         genres=[dict(noms=[dict(langue='en', text='Puzzle')]), dict(noms=[dict(langue='en', text='Action')]),
                 dict(noms=[dict(langue='en', text='Arcade')])],
         joueurs=dict(text='1-2'),
+        editeur=dict(id='1', text='  Made Up\nSoft '),
         medias=[dict(type='ss', region='wor', url='https://neoclone.screenscraper.fr/ss.png', format='png'),
                 dict(type='box-2D', region='jp', url='https://neoclone.screenscraper.fr/box-jp.png', format='png'),
                 dict(type='box-2D', region='us', url='https://neoclone.screenscraper.fr/box-us.png', format='png')],
@@ -199,7 +200,7 @@ class ScreenScraperTests(IsolatedAsyncioTestCase):
         self.assertEqual(found.art, b'box')
         self.assertEqual(self.http.requests[1][0], 'https://neoclone.screenscraper.fr/box-us.png')
         self.assertEqual(found.about, dict(description='A puzzle game.', year='1998', genre='Puzzle, Action',
-                                           players='1-2'))
+                                           players='1-2', publisher='Made Up Soft'))
 
     async def test_follows_the_accounts_limits(self):
         provider = self.provider(('jeuInfos.php', 200, answer(maxrequestspermin='20')))

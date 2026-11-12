@@ -372,7 +372,7 @@ providers to try, in order:
 | Provider | Gives | Needs |
 |---|---|---|
 | `libretro` | Box art from the [libretro-thumbnails](https://github.com/libretro-thumbnails) repositories: the box, else the title screen, else a screenshot | Nothing |
-| `screenscraper` | Box art, description, year, genre and number of players from [ScreenScraper](https://www.screenscraper.fr/) | Developer credentials and, for usable quotas, a user account |
+| `screenscraper` | Box art, description, year, genre, number of players and publisher from [ScreenScraper](https://www.screenscraper.fr/) | Developer credentials and, for usable quotas, a user account |
 
 ```sh
 ./run.sh --library DIR --metadata libretro,screenscraper
@@ -408,8 +408,19 @@ the page shows the results as they arrive.
   (no network, a quota) is not, and shows as a short note on the card.
 - **An upload always wins.** Fetched art is shown only when there is no
   upload and no library cover, and fetching never changes either.
-- **Details.** The year and genre show on the card. A description adds an
-  "About" button that shows it with the number of players.
+- **Details.** Each one is optional: description, year, genre, number of
+  players and publisher, kept by game id with the art. libretro gives images
+  only. The year and genre show on the card, a description adds an "About"
+  button, and all of them show in "Now playing".
+- **Your own details win.** A player who may choose games can set the
+  description, year and genre of the running game by hand ("Edit details" in
+  "Now playing"). The host checks that right, caps the description at 2,000
+  characters and the genre at 60, takes a year from 1940 to 2099, and keeps the
+  text plain: control and formatting characters are dropped, and the page
+  shows it as text, never as markup. Edits are kept in
+  `--covers DIR/edited/<game id>.json`, apart from what a provider found, so
+  fetching again never changes them. Emptying a field shows the fetched one
+  again.
 
 **libretro-thumbnails.** No account or key. The repositories state no licence
 for the images: the art belongs to each game's developers and publishers.
@@ -462,6 +473,16 @@ instead of in one pair shared by every game. A `--disc` game still saves in
 PS1 library games use four slots on the multitap, as with `--disc`. PS2 games
 use two, or four when the multitap core is built (see "PS2"). `--players` and
 `--core-option` apply to every library game.
+
+### Now playing
+
+While a game runs, a "Now playing" panel shows its cover, clean title, console,
+how long it has been running and who has which player slot. It also shows any
+details the game has (see above). With only a cover, a title and a console, it
+shows just those. It sits beside the stream on a wide screen, and below the
+stream and the touch controls on a phone, where it starts folded. It never
+covers the game. It follows the game as it switches and goes away when the
+game stops. It shows players nothing the games screen and the slots do not.
 
 ### Boot screen
 

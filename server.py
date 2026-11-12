@@ -198,8 +198,8 @@ class Room:
             if not self.covers or not game:
                 return dict(entry, cover=None)
             record = self.covers.record(game.id) or {}
-            about = record.get('about')
-            entry = dict(entry, cover=self.covers.info(game), about=about if isinstance(about, dict) and about else None)
+            about, _ = self.covers.about(game.id)
+            entry = dict(entry, cover=self.covers.info(game), about=about or None)
             if self.fetcher:
                 status = self.fetcher.status(game.id)
                 entry['fetch'] = dict(state=status['state'], note=status['note'] or record.get('note'),
@@ -280,6 +280,42 @@ class Room:
         else:
             games = [self.cover_game(body.get('id'))]
         return web.json_response(dict(ok=True, queued=self.fetcher.request(games)))
+
+    async def playing(self, request):
+        """The running game for the Now playing panel: title, console, cover version and details.
+
+        Only what the library listing already shows players; the slots come from /api/state.
+        """
+        _, client = self.authenticate(request)
+        game_id = getattr(self.session, 'game_id', None)
+        game = self.library.games.get(game_id) if self.library and game_id else None
+        if not game:
+            return web.json_response(dict(game=None))
+        console = next((entry['name'] for entry in self.library.consoles if entry['id'] == game.console),
+                       game.console.upper())
+        if self.covers:
+            cover = await asyncio.to_thread(self.covers.info, game)
+            about, edited = await asyncio.to_thread(self.covers.about, game.id)
+        else:
+            cover, about, edited = None, {}, []
+        return web.json_response(dict(game=dict(id=game.id, title=game.name, console=console, consoleId=game.console,
+                                                cover=cover, about=about, edited=edited),
+                                      canEdit=bool(self.can_pick(client) and self.covers and self.covers.root)))
+
+    async def about_edit(self, request):
+        """An admin's own description, year or genre for a game. Empty text goes back to the fetched one."""
+        self.cover_admin(request)
+        body = await request.json()
+        if not isinstance(body, dict):
+            raise web.HTTPBadRequest(text='Invalid details')
+        game = self.cover_game(body.pop('id', None))
+        try:
+            changes = cover_art.checked_edits(body)
+        except ValueError as error:
+            raise web.HTTPBadRequest(text=str(error)) from None
+        async with self.cover_lock:
+            about, edited = await asyncio.to_thread(self.covers.save_edits, game.id, changes)
+        return web.json_response(dict(ok=True, about=about, edited=edited))
 
     async def admin(self, request):
         """Unlock game picking for this player with the --admin-pin."""
@@ -613,11 +649,13 @@ def make_app(room, trusted_proxies=()):
     for route, handler in [('join', room.join), ('offer', room.offer), ('claim', room.claim),
                            ('release', room.release), ('leave', room.leave), ('admin', room.admin),
                            ('game', room.pick), ('game/stop', room.unpick), ('cover', room.cover_upload),
-                           ('cover/remove', room.cover_remove), ('cover/fetch', room.cover_fetch)]:
+                           ('cover/remove', room.cover_remove), ('cover/fetch', room.cover_fetch),
+                           ('game/about', room.about_edit)]:
         app.router.add_post('/api/' + route, handler)
     app.router.add_get('/api/state', room.state)
     app.router.add_get('/api/library', room.games)
     app.router.add_get('/api/cover', room.cover)
+    app.router.add_get('/api/playing', room.playing)
     app.router.add_get('/api/socket', room.socket)
     async def index(request):
         return web.FileResponse(ROOT / 'web/index.html')

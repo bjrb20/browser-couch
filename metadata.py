@@ -33,6 +33,8 @@ AGENT = 'SofaLink/1.0 (game cover art for a self-hosted game host)'
 SOFTNAME = 'SofaLink'
 MAX_DOWNLOAD = cover_art.MAX_UPLOAD*4
 MAX_TEXT = 1500  # characters of description kept
+# The details a provider may find, all optional: libretro finds none, ScreenScraper most.
+FIELDS = cover_art.FIELDS
 SERIAL = re.compile(r'\b([A-Z]{4})[-_ ]?(\d{3})\.?(\d{2})\b')
 
 
@@ -48,7 +50,7 @@ class ProviderError(Exception):
 @dataclass
 class Found:
     art: bytes = None  # the image as downloaded; the caller re-encodes it
-    about: dict = field(default_factory=dict)  # description, year, genre, players
+    about: dict = field(default_factory=dict)  # any of FIELDS, as text
 
 
 class Http:
@@ -349,6 +351,9 @@ class ScreenScraper(Provider):
         players = jeu.get('joueurs')
         if isinstance(players, dict) and isinstance(players.get('text'), str):
             about['players'] = players['text'][:16]
+        publisher = jeu.get('editeur')
+        if isinstance(publisher, dict) and isinstance(publisher.get('text'), str) and publisher['text'].strip():
+            about['publisher'] = ' '.join(publisher['text'].split())[:80]
         return {key: value[:MAX_TEXT+1] for key, value in about.items()}
 
     def media(self, jeu):

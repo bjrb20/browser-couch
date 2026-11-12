@@ -51,3 +51,40 @@ body[data-player="2"]{--me:var(--p2)}body[data-player="3"]{--me:var(--p3)}body[d
 @media(max-width:900px){.picker-tools{top:-8px}}
 @media(max-width:700px){.join-card.picker-card{width:95%;max-height:96%;max-width:none;padding:14px}.picker-tools{top:-14px}.games{grid-template-columns:repeat(auto-fill,minmax(100px,1fr));gap:9px}.art.placeholder span{font-size:12px}}
 @media(max-width:700px){.screen.picking{aspect-ratio:auto;height:min(86dvh,760px);min-height:430px}.picker-card h2{font-size:21px;margin:8px 0}.picker-card>p{margin-bottom:10px}}
+
+/* Now playing: in the side column, beside the stream on a desktop and below it and the touch controls on a phone */
+.now-playing{border:1px solid var(--border);border-radius:4px;background:var(--panel);margin:0 0 22px;overflow:hidden}
+.now-playing summary{display:flex;align-items:baseline;gap:10px;padding:11px 13px;cursor:pointer;list-style:none;min-width:0}
+.now-playing summary::-webkit-details-marker{display:none}
+.now-playing summary::after{content:"▾";margin-left:auto;color:var(--muted);font-size:11px;transition:transform .15s}
+.now-playing:not([open]) summary::after{transform:rotate(-90deg)}
+.now-playing summary:focus-visible{outline:2px solid var(--me);outline-offset:-2px}
+.np-short{font-size:12px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
+.now-playing[open] .np-short{display:none}
+.np-art{position:relative;height:180px;display:flex;justify-content:center;align-items:center;overflow:hidden;background:#06090b;border-top:1px solid var(--border);border-bottom:1px solid var(--border)}
+.np-art img{position:relative;height:100%;width:auto;max-width:100%;object-fit:contain;display:block}
+.np-art .np-back{position:absolute;inset:-20px;width:calc(100% + 40px);height:calc(100% + 40px);max-width:none;object-fit:cover;filter:blur(18px) brightness(.45);transform:scale(1.1)}
+.np-art.placeholder{height:110px;background:linear-gradient(160deg,#1a3441,#0b1419 70%)}
+.np-art.placeholder[data-console=ps1]{background:linear-gradient(160deg,#2a3a2b,#0b1419 70%)}
+.np-art.placeholder b{font-family:var(--pixel);font-size:30px;color:var(--green);letter-spacing:4px;opacity:.8}
+.np-body{padding:12px 13px 14px}
+.np-body h2{font-size:16px;letter-spacing:-.4px;line-height:1.3;margin:0;overflow-wrap:anywhere}
+.np-line{font-family:var(--pixel);font-size:10px;color:var(--muted);margin:6px 0 0}
+.np-facts{margin:11px 0 0;display:grid;grid-template-columns:auto 1fr;gap:5px 10px;font-size:11px}
+.np-facts>div{display:contents}.np-facts dt{color:var(--muted)}.np-facts dd{margin:0;overflow-wrap:anywhere}
+.np-description{font-size:11px;line-height:1.6;color:#cbd6da;margin:11px 0 0;white-space:pre-line;overflow-wrap:anywhere;max-height:13.5em;overflow:auto}
+.np-players{list-style:none;padding:0;margin:12px 0 0;display:flex;flex-wrap:wrap;gap:5px}
+.np-players li{display:flex;gap:6px;align-items:center;font-size:11px;border:1px solid var(--border);border-left:3px solid var(--pc,var(--border));border-radius:3px;padding:4px 7px;min-width:0;overflow-wrap:anywhere}
+.np-players li.p1{--pc:var(--p1)}.np-players li.p2{--pc:var(--p2)}.np-players li.p3{--pc:var(--p3)}.np-players li.p4{--pc:var(--p4)}
+.np-players b{font-family:var(--pixel);font-size:10px;color:var(--pc)}
+.np-players .np-none{color:var(--muted);border-left-color:var(--border)}
+#np-edit{margin-top:12px;font-size:10px;padding:7px 10px}
+.np-form{margin-top:12px;display:flex;flex-direction:column;gap:9px}
+.np-form label{display:flex;flex-direction:column;gap:5px;font-size:10px;color:#cbd6da;min-width:0}
+.np-form textarea,.np-form input{width:100%;background:#0b1419;color:var(--text);border:1px solid #3b505c;border-radius:4px;padding:8px;font:inherit;font-size:12px;resize:vertical}
+.np-pair{display:grid;grid-template-columns:5.5em 1fr;gap:8px}
+.np-hint{font-size:10px;color:var(--muted);margin:0}
+.np-actions{display:flex;gap:6px}.np-actions button{flex:1;font-size:10px;padding:8px}
+.np-save{background:var(--green);color:#172315;border-color:var(--green)}
+@media(max-width:700px){.now-playing{margin:4px 0 20px}.np-art{height:150px}.np-art.placeholder{height:90px}}
+.np-save:hover:enabled{background:#d0ff94;color:#172315}
