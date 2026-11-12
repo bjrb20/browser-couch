@@ -497,11 +497,19 @@ class Igdb(Provider):
 
     @staticmethod
     def searches(title):
-        """What to search for: the clean title, with a colon for " - ", then its subtitle alone."""
+        """What to search for: the clean title, with a colon for " - ", its subtitle alone, then its last three words.
+
+        IGDB's search wants whole words, so a title spelt with a word split in two ("Idai naru"
+        for "Idainaru") finds nothing; its last words still find the game, and the strict name
+        check in sureness() decides whether it is the one.
+        """
         title = re.sub(r'["\\]', '', title).strip()
         names = [title, title.replace(' - ', ': ')]
         if ' - ' in title:
             names.append(title.rsplit(' - ', 1)[1])
+        words = re.sub(r'[^\w\s]', ' ', title).split()
+        if len(words) > 3:
+            names.append(' '.join(words[-3:]))
         return list(dict.fromkeys(name for name in names if name))
 
     @staticmethod

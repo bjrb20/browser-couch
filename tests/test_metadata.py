@@ -343,6 +343,11 @@ class IgdbTests(IsolatedAsyncioTestCase):
         self.assertEqual(found.match['id'], 21)
         searches = [post[1].decode().split(';')[0] for post in http.posts if post[0].endswith('/games')]
         self.assertEqual(searches, ['search "Sky Ball Z - Den Setsu"', 'search "Sky Ball Z: Den Setsu"', 'search "Den Setsu"'])
+        # A word split in two finds nothing by name: the last three words still find it.
+        provider, http = igdb(('search "Moon Cup Densetsu"', 200, games(
+            entry(61, 'Moon Saga: The Legend', alternative_names=[dict(id=1, name='Moon Saga: Idainaru Moon Cup Densetsu')]))))
+        self.assertEqual((await provider.lookup(game('Moon Saga - Idai naru Moon Cup Densetsu (Japan)'))).match['id'], 61)
+        self.assertEqual(Igdb.searches('Canyon Racer'), ['Canyon Racer'])
 
     async def test_shows_nothing_rather_than_a_wrong_match(self):
         provider, _ = igdb(('games', 200, games(entry(41, 'Canyon Racer 2'), entry(42, 'Super Canyon Racer Deluxe'),

@@ -448,7 +448,9 @@ How a game is matched:
 
 - It searches for the clean title on the game's console only (PlayStation or
   PlayStation 2), then for the title with `: ` in place of ` - `, then for the
-  part after the last ` - ` alone.
+  part after the last ` - ` alone, then for its last three words. IGDB's search
+  wants whole words, so a romanised title with a word split in two (`Idai naru`
+  for `Idainaru`) finds nothing by its full name.
 - It takes a result only when it is sure: the result's name or one of its
   alternative names (where IGDB keeps Japanese titles and other spellings) is
   the same once spacing, punctuation, case and accents are dropped, or is the
