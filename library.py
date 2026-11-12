@@ -7,11 +7,13 @@ from dataclasses import dataclass
 import hashlib
 from pathlib import Path
 import platform as platforms
+import re
 
 from fetch_core import core_filename
 from systems import PROFILES
 
 MAX_FILES = 20000  # stop scanning a huge or looping folder tree
+TAGS = re.compile(r'(\s*(\([^()]*\)|\[[^\[\]]*\]))+\s*$')  # trailing (Region) [SERIAL] groups
 
 
 @dataclass(frozen=True)
@@ -21,6 +23,25 @@ class Game:
     console: str  # the library folder, for example ps2
     profile: str  # the system profile that runs it, for example ps2-play
     path: Path
+    display: str = ''  # the title browsers see; `title` names the save folder and never changes
+
+    @property
+    def name(self):
+        return self.display or self.title
+
+
+def clean_title(title):
+    """The title without its trailing (...) and [...] groups, or the title itself if nothing would be left."""
+    return TAGS.sub('', title).strip() or title
+
+
+def display_titles(titles):
+    """Clean titles, except where two games would share one: those keep their full titles."""
+    clean = [clean_title(title) for title in titles]
+    counts = {}
+    for name in clean:
+        counts[name.casefold()] = counts.get(name.casefold(), 0) + 1
+    return [name if counts[name.casefold()] == 1 else title for title, name in zip(titles, clean)]
 
 
 def consoles():
@@ -156,13 +177,13 @@ class Library:
             per_folder = {}
             for path in found:
                 per_folder[path.parent] = per_folder.get(path.parent, 0) + 1
-            for path in found:
-                relative = path.relative_to(folder)
-                # A game alone in its own folder is named after the folder, not GAME.cue.
-                title = path.parent.name if path.parent != folder and per_folder[path.parent] == 1 else path.stem
-                game = Game(game_id(console, relative), title, console, profile.key, path)
+            # A game alone in its own folder is named after the folder, not GAME.cue.
+            titles = [path.parent.name if path.parent != folder and per_folder[path.parent] == 1 else path.stem
+                      for path in found]
+            for path, title, display in zip(found, titles, display_titles(titles)):
+                game = Game(game_id(console, path.relative_to(folder)), title, console, profile.key, path, display)
                 games[game.id] = game
-                entry['games'].append(dict(id=game.id, title=game.title))
+                entry['games'].append(dict(id=game.id, title=game.name))
             entry['games'].sort(key=lambda item: item['title'].casefold())
         self.games, self.consoles = games, listing
         return self

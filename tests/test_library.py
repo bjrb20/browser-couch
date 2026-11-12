@@ -7,7 +7,8 @@ from aiohttp.test_utils import TestClient, TestServer
 
 from fetch_core import core_filename
 from inputs import InputHub
-from library import Library, game_id, missing_tracks
+from library import Library, clean_title, display_titles, game_id, missing_tracks
+from session import Launcher
 from server import Room, make_app
 from session import Session
 
@@ -146,6 +147,30 @@ class ScanTests(TestCase):
         self.host.core('pcsx_rearmed')
         titles = [item['title'] for item in console(self.host.scan(), 'ps1')['games']]
         self.assertEqual(titles, ['Fighter', 'Puzzle', 'Saga'], 'the library still lists it')
+
+    def test_titles_lose_their_trailing_tags_for_display_only(self):
+        self.assertEqual(clean_title('Fighter Legend - Part Two (Japan) [SLPS-01234]'), 'Fighter Legend - Part Two')
+        self.assertEqual(clean_title('Canyon Racer (Europe) (EnFrDeEsIt)'), 'Canyon Racer')
+        self.assertEqual(clean_title('Racer (Disc 1) Special'), 'Racer (Disc 1) Special', 'only trailing groups go')
+        self.assertEqual(clean_title('(Japan) [SLPS-01234]'), '(Japan) [SLPS-01234]', 'never an empty title')
+        self.assertEqual(display_titles(['Saga (Europe)', 'Saga (Japan)', 'Racer (USA)', 'racer']),
+                         ['Saga (Europe)', 'Saga (Japan)', 'Racer (USA)', 'racer'], 'clashes keep their full titles')
+        self.assertEqual(display_titles(['Saga (Europe)', 'Racer (USA)']), ['Saga', 'Racer'])
+
+    def test_display_titles_keep_ids_and_save_folders(self):
+        self.host.core('pcsx_rearmed')
+        self.host.file('ps1/Fighter (Japan) [SLPS-01234]/Fighter.chd')
+        self.host.file('ps1/Saga (Europe).chd')
+        self.host.file('ps1/Saga (Japan).chd')
+        self.host.file('ps1/(Demo).pbp')
+        library = self.host.scan()
+        listed = {item['title']: item['id'] for item in console(library, 'ps1')['games']}
+        self.assertEqual(sorted(listed), ['(Demo)', 'Fighter', 'Saga (Europe)', 'Saga (Japan)'])
+        game = library.games[listed['Fighter']]
+        self.assertEqual(game.id, game_id('ps1', Path('Fighter (Japan) [SLPS-01234]/Fighter.chd')), 'the id is unchanged')
+        self.assertEqual(game.title, 'Fighter (Japan) [SLPS-01234]')
+        saves = Launcher(self.host.system, self.host.root/'saves', self.host.cores).save_folder(game)
+        self.assertEqual(saves.name, f'Fighter (Japan) [SLPS-01234] [{game.id[:8]}]', 'existing saves still match')
 
 
 class LibraryApiTests(IsolatedAsyncioTestCase):

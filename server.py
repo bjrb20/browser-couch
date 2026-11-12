@@ -209,7 +209,7 @@ class Room:
             try:
                 boot = body.get('bootScreen')
                 emulator = self.launcher.emulator(game, self.hub, boot if isinstance(boot, bool) else None)
-                await self.session.load(emulator, game.title, game.id)
+                await self.session.load(emulator, game.name, game.id)
             except RuntimeError as error:
                 print(error, flush=True)
                 raise web.HTTPInternalServerError(text=str(error)) from error

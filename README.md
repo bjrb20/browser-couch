@@ -315,6 +315,11 @@ names and the discs that an M3U names are not listed separately. A game alone
 in its own folder takes the folder's name. Files and folders that start with
 a dot are skipped.
 
+The page shows each title without its trailing groups in brackets, so
+`Canyon Racer (Europe) [SLES-01234]` shows as `Canyon Racer`. Files are not
+renamed, and the save folder keeps the full name. If two games of a console
+would show the same title, both keep their full names.
+
 The host prints each console and its number of games at startup. A console
 whose core is missing, whose core does not run on this platform, or whose
 required BIOS is missing lists no games, only a warning. PS2 games use PCSX2
