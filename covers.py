@@ -1,0 +1,169 @@
+"""Cover art for library games, keyed by the same game id as the saves.
+
+Two sources, checked in this order:
+- an image an admin uploaded, kept in the covers folder as <game id>.jpg;
+- cover.jpg, cover.jpeg or cover.png in a game's own folder in the library.
+
+Every image is decoded and re-encoded here before a browser sees it: JPEG,
+PNG or WebP by content, at most MAX_SIZE on each side, as a JPEG with no
+metadata. Browsers only ever name a game id, never a path.
+"""
+from collections import OrderedDict
+import hashlib
+from io import BytesIO
+import os
+from pathlib import Path
+import re
+import secrets
+
+from PIL import Image, ImageOps
+
+MAX_UPLOAD = 5*1024*1024  # bytes
+MAX_SIZE = (600, 900)  # width, height: box art is portrait
+MAX_PIXELS = 40_000_000  # refuse to decode anything larger, whatever the file size
+FORMATS = ('JPEG', 'PNG', 'WEBP')
+SIDECARS = ('cover.jpg', 'cover.jpeg', 'cover.png')
+GAME_ID = re.compile(r'[0-9a-f]{16}')
+BACKGROUND = (12, 18, 22)  # the page background, under transparent pixels
+
+
+class BadImage(ValueError):
+    """The upload is not an image we accept. The message is safe to show a browser."""
+
+
+def encode(data, limit=MAX_UPLOAD):
+    """Validate image bytes and return a clean JPEG: decoded by content, downscaled, no metadata."""
+    if len(data) > limit:
+        raise BadImage(f'Use an image of at most {limit//(1024*1024)} MB')
+    try:
+        with Image.open(BytesIO(data), formats=FORMATS) as image:
+            if image.width*image.height > MAX_PIXELS:
+                raise BadImage('That image has too many pixels')
+            image.draft('RGB', (MAX_SIZE[0]*2, MAX_SIZE[1]*2))  # JPEG only: decode at a smaller scale
+            image.seek(0)  # the first frame of an animation
+            image = ImageOps.exif_transpose(image)
+            image.load()
+    except BadImage:
+        raise
+    except (Image.DecompressionBombError, Image.UnidentifiedImageError):
+        raise BadImage('Use a JPEG, PNG or WebP image') from None
+    except Exception:  # truncated or corrupt files fail in many ways inside the decoders
+        raise BadImage('That image could not be read') from None
+    if image.mode in ('RGBA', 'LA', 'PA') or image.mode == 'P' and 'transparency' in image.info:
+        image = image.convert('RGBA')
+        flat = Image.new('RGB', image.size, BACKGROUND)
+        flat.paste(image, mask=image.getchannel('A'))
+        image = flat
+    else:
+        image = image.convert('RGB')
+    image.thumbnail(MAX_SIZE, Image.Resampling.LANCZOS)
+    # A new RGB image carries no EXIF, ICC profile, comment or XMP: save adds only what it is given.
+    clean = Image.new('RGB', image.size)
+    clean.paste(image)
+    out = BytesIO()
+    clean.save(out, 'JPEG', quality=85, optimize=True, progressive=True)
+    return out.getvalue()
+
+
+def checked_id(game_id):
+    if not isinstance(game_id, str) or not GAME_ID.fullmatch(game_id):
+        raise ValueError('Not a game id')
+    return game_id
+
+
+class Covers:
+    def __init__(self, root, library_root=None, cache=64):
+        self.root = Path(root) if root else None
+        self.library_root = Path(library_root).resolve() if library_root else None
+        self.cache = OrderedDict()  # (path, mtime, size) -> encoded library cover
+        self.cache_size = cache
+
+    def uploaded(self, game_id):
+        return self.root/f'{checked_id(game_id)}.jpg' if self.root else None
+
+    def sidecar(self, game):
+        """cover.jpg or cover.png in the game's own folder, not one the console's games share."""
+        folder = game.path.parent
+        if self.library_root and folder.resolve() == (self.library_root/game.console).resolve():
+            return None
+        for name in SIDECARS:
+            for path in (folder/name, folder/name.upper()):
+                if path.is_file():
+                    return path
+        return None
+
+    def _stat(self, path):
+        try:
+            return path.stat() if path and path.is_file() else None
+        except OSError:
+            return None
+
+    def info(self, game):
+        """For the library listing: None, or {version, uploaded} with no path in it."""
+        upload = self._stat(self.uploaded(game.id))
+        if upload:
+            return dict(version=self._version('u', upload), uploaded=True)
+        path = self.sidecar(game)
+        stat = self._stat(path)
+        if stat:
+            return dict(version=self._version('f', stat), uploaded=False)
+        return None
+
+    @staticmethod
+    def _version(kind, stat):
+        return hashlib.sha256(f'{kind}{stat.st_mtime_ns}:{stat.st_size}'.encode()).hexdigest()[:12]
+
+    def read(self, game):
+        """The cover's JPEG bytes, or None."""
+        upload = self.uploaded(game.id)
+        try:
+            if upload and upload.is_file():
+                return upload.read_bytes()
+        except OSError:
+            pass
+        path = self.sidecar(game)
+        stat = self._stat(path)
+        if not stat:
+            return None
+        key = (str(path), stat.st_mtime_ns, stat.st_size)
+        if key in self.cache:
+            self.cache.move_to_end(key)
+            return self.cache[key]
+        if stat.st_size > MAX_UPLOAD*4:
+            return None
+        try:
+            # The host put this file in the library, so it may be bigger than an upload may be.
+            data = encode(path.read_bytes(), MAX_UPLOAD*4)
+        except (BadImage, OSError):
+            return None
+        self.cache[key] = data
+        while len(self.cache) > self.cache_size:
+            self.cache.popitem(last=False)
+        return data
+
+    def save(self, game_id, data):
+        """Store an upload's clean JPEG, replacing any earlier one. `data` is from encode()."""
+        if not self.root:
+            raise OSError('No covers folder')
+        path = self.uploaded(game_id)
+        self.root.mkdir(parents=True, exist_ok=True)
+        temporary = self.root/f'.{game_id}.{secrets.token_hex(4)}.tmp'
+        try:
+            with open(temporary, 'wb') as file:
+                file.write(data)
+                file.flush()
+                os.fsync(file.fileno())
+            temporary.replace(path)
+        finally:
+            temporary.unlink(missing_ok=True)
+
+    def remove(self, game_id):
+        """Remove an uploaded cover. A library cover.jpg stays: the library is read-only."""
+        path = self.uploaded(game_id)
+        if not path:
+            return False
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            return False
+        return True

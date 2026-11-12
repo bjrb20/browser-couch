@@ -21,6 +21,8 @@ from aiohttp import web
 from aiortc import RTCConfiguration, RTCIceServer, RTCPeerConnection, RTCSessionDescription
 from aiortc.contrib.media import MediaRelay
 
+import covers as cover_art
+from covers import Covers
 from emulator import Emulator
 from fetch_core import core_filename
 from inputs import InputHub
@@ -84,8 +86,10 @@ def host_ice_servers(servers):
 
 class Room:
     def __init__(self, session, pin, ice_servers=None, udp_ports=None, library=None, launcher=None,
-                 admin_pin=None):
+                 admin_pin=None, covers=None):
         self.udp_ports = udp_ports
+        self.covers = covers
+        self.cover_lock = asyncio.Lock()
         self.library = library
         self.launcher = launcher
         self.admin_pin = admin_pin
@@ -115,7 +119,7 @@ class Room:
         return token, self.clients[token]
 
     def throttle(self, key, what):
-        """The failed attempts from one address in the last minute; refuse a 13th."""
+        """The attempts from one address in the last minute; refuse a 13th. Callers add them."""
         now = time.monotonic()
         # Bounded rate-limit table; forwarding proxies can supply one shared IP.
         if len(self.attempts) > 2048:
@@ -170,8 +174,73 @@ class Room:
             if self.scanned_at is None or time.monotonic()-self.scanned_at > 10:
                 await asyncio.to_thread(self.library.scan)
                 self.scanned_at = time.monotonic()
-        return web.json_response(dict(self.library.public(),
-                                      bootScreen=bool(self.launcher and self.launcher.boot_screen)))
+            listing = await asyncio.to_thread(self.with_covers, self.library.public())
+        return web.json_response(dict(listing, bootScreen=bool(self.launcher and self.launcher.boot_screen),
+                                      covers=bool(self.covers and self.covers.root)))
+
+    def with_covers(self, listing):
+        """The listing with each game's cover version, or None, for the page's cache. No paths."""
+        games = self.library.games
+        return dict(listing, consoles=[dict(console, games=[
+            dict(item, cover=self.covers.info(games[item['id']]) if self.covers and item['id'] in games else None)
+            for item in console['games']]) for console in listing['consoles']])
+
+    def cover_game(self, game_id):
+        game = self.library.games.get(game_id) if self.library and isinstance(game_id, str) else None
+        if not game:
+            raise web.HTTPNotFound(text='That game is no longer in the library')
+        return game
+
+    async def cover(self, request):
+        """A game's cover as a JPEG, by game id. Every player in the room may see covers."""
+        self.authenticate(request)
+        game = self.cover_game(request.query.get('id'))
+        data = await asyncio.to_thread(self.covers.read, game) if self.covers else None
+        if not data:
+            raise web.HTTPNotFound(text='No cover for this game')
+        return web.Response(body=data, content_type='image/jpeg')
+
+    def cover_admin(self, request):
+        """Changing covers takes the same right as choosing games: the server checks it, not only the page."""
+        _, client = self.authenticate(request)
+        if not self.library:
+            raise web.HTTPNotFound(text='This host has no game library')
+        if not self.can_pick(client):
+            raise web.HTTPForbidden(text='Enter the PIN to change covers')
+        if not self.covers or not self.covers.root:
+            raise web.HTTPNotFound(text='This host has no covers folder')
+        # Every change counts here, not only failures: 12 a minute is plenty for a person.
+        self.throttle(('cover', request.remote), 'cover change').append(time.monotonic())
+
+    async def cover_upload(self, request):
+        """Store an uploaded cover: the request body is the image file itself."""
+        self.cover_admin(request)
+        game = self.cover_game(request.query.get('id'))
+        if (request.content_length or 0) > cover_art.MAX_UPLOAD:
+            raise web.HTTPRequestEntityTooLarge(max_size=cover_art.MAX_UPLOAD, actual_size=request.content_length,
+                                                text='Use an image of at most 5 MB')
+        data = bytearray()
+        async for chunk in request.content.iter_chunked(64*1024):
+            data += chunk
+            if len(data) > cover_art.MAX_UPLOAD:
+                raise web.HTTPRequestEntityTooLarge(max_size=cover_art.MAX_UPLOAD, actual_size=len(data),
+                                                    text='Use an image of at most 5 MB')
+        # One decode at a time, off the event loop: the emulator needs the CPU more.
+        async with self.cover_lock:
+            try:
+                clean = await asyncio.to_thread(cover_art.encode, bytes(data))
+            except cover_art.BadImage as error:
+                raise web.HTTPUnsupportedMediaType(text=str(error)) from None
+            await asyncio.to_thread(self.covers.save, game.id, clean)
+        return web.json_response(dict(ok=True, cover=await asyncio.to_thread(self.covers.info, game)))
+
+    async def cover_remove(self, request):
+        """Remove an uploaded cover. A cover.jpg in the library shows again."""
+        self.cover_admin(request)
+        body = await request.json()
+        game = self.cover_game(body.get('id') if isinstance(body, dict) else None)
+        await asyncio.to_thread(self.covers.remove, game.id)
+        return web.json_response(dict(ok=True, cover=await asyncio.to_thread(self.covers.info, game)))
 
     async def admin(self, request):
         """Unlock game picking for this player with the --admin-pin."""
@@ -494,7 +563,7 @@ async def same_origin(request, handler):
     response.headers['Cache-Control'] = 'no-store'
     response.headers['X-Content-Type-Options'] = 'nosniff'
     response.headers['Referrer-Policy'] = 'no-referrer'
-    response.headers['Content-Security-Policy'] = "default-src 'self'; script-src 'self' 'sha256-vBOUmmOOBseWYF7umUPs8lyA/gWt60gVw1o2t5RUrQM='; style-src 'self'; media-src 'self' blob:; connect-src 'self'; img-src 'self' data:; frame-ancestors 'none'"
+    response.headers['Content-Security-Policy'] = "default-src 'self'; script-src 'self' 'sha256-vBOUmmOOBseWYF7umUPs8lyA/gWt60gVw1o2t5RUrQM='; style-src 'self'; media-src 'self' blob:; connect-src 'self'; img-src 'self' data: blob:; frame-ancestors 'none'"
     return response
 
 
@@ -502,10 +571,12 @@ def make_app(room, trusted_proxies=()):
     app = web.Application(middlewares=[forwarded(trusted_proxies), same_origin], client_max_size=256*1024)
     for route, handler in [('join', room.join), ('offer', room.offer), ('claim', room.claim),
                            ('release', room.release), ('leave', room.leave), ('admin', room.admin),
-                           ('game', room.pick), ('game/stop', room.unpick)]:
+                           ('game', room.pick), ('game/stop', room.unpick), ('cover', room.cover_upload),
+                           ('cover/remove', room.cover_remove)]:
         app.router.add_post('/api/' + route, handler)
     app.router.add_get('/api/state', room.state)
     app.router.add_get('/api/library', room.games)
+    app.router.add_get('/api/cover', room.cover)
     app.router.add_get('/api/socket', room.socket)
     async def index(request):
         return web.FileResponse(ROOT / 'web/index.html')
@@ -529,6 +600,8 @@ def main():
                         help='Game folder with one subfolder per console: ps1, ps2')
     parser.add_argument('--system', default=str(ROOT/'runtime/system'))
     parser.add_argument('--saves', default=str(ROOT/'runtime/saves'))
+    parser.add_argument('--covers', default=str(ROOT/'runtime/covers'),
+                        help='Writable folder for the cover art players with the admin PIN upload')
     parser.add_argument('--state', help='Optional host-side emulator snapshot to restore')
     parser.add_argument('--multitap', choices=PROFILES['ps1'].multitaps,
                         help='Default: port 1 on PS1; on PS2, port 1 for more than two players')
@@ -606,7 +679,7 @@ def main():
         session, pin, ice, args.udp_ports, library,
         Launcher(args.system, args.saves, ROOT/'runtime/cores', args.players, tuple(args.core_option),
                  args.boot_screen),
-        args.admin_pin), args.trusted_proxy), host=args.host, port=args.port,
+        args.admin_pin, Covers(args.covers, args.library) if library else None), args.trusted_proxy), host=args.host, port=args.port,
                 ssl_context=context, access_log=None)
 
 

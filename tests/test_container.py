@@ -107,6 +107,7 @@ class ContainerStartTests(unittest.TestCase):
         self.assertEqual(args[args.index('--trusted-proxy')+1], '192.0.2.1')
         self.assertEqual(args[args.index('--ice-config')+1], '/turn/ice.json')
         self.assertIn('--no-boot-screen', args)
+        self.assertEqual(args[args.index('--covers')+1], '/data/covers')
         self.assertNotIn('--trusted-proxy', start.command({}, None))
         self.assertNotIn('--ice-config', start.command({}, None))
 

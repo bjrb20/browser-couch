@@ -326,8 +326,41 @@ required BIOS is missing lists no games, only a warning. PS2 games use PCSX2
 when its BIOS is present, otherwise Play!. A PS1 without a BIOS runs on the
 core's built-in HLE BIOS, with a warning.
 
-Browsers get only the console names, game titles and ids. They never get
-file paths, discs, ROMs or BIOS files.
+Browsers get only the console names, game titles, ids and cover art. They
+never get file paths, discs, ROMs or BIOS files.
+
+### Games screen and cover art
+
+The list is a grid of cards, one per game, grouped by console. The search box
+filters it as you type; case and accents do not matter. With more than one
+console, the buttons beside it show one console or all. Arrow keys, or a
+gamepad's D-pad and left stick, move between cards; Enter, Space or the pad's
+✕ picks; ○ goes back to a running game.
+
+A game's card shows its cover, from one of these, the first that exists:
+
+1. An image uploaded on the page. Players who may choose games (see "Choose
+   and switch games") get "Add cover", "Change cover" and "Remove" on each
+   card. The host checks that right for every change, not only the page.
+2. `cover.jpg`, `cover.jpeg` or `cover.png` in the game's own folder in the
+   library, for example `DIR/ps1/Canyon Racer/cover.jpg`. A cover in a console
+   folder itself would belong to every game there, so it is ignored.
+
+Without either, the card shows the console and title. Removing an upload shows
+the library cover again; the host never writes to the library.
+
+Uploads go in `--covers DIR` (default `runtime/covers/`; `/data/covers` in the
+container), as `<game id>.jpg`, with the same id as the saves, so a cover stays
+with its game when a title changes. The host takes JPEG, PNG or WebP of at
+most 5 MB, recognised by their content, not their name. It decodes the image,
+applies its orientation, scales it to fit 600 × 900 pixels and saves it as a
+new JPEG with no metadata (no EXIF, location, camera, comment or colour
+profile). Library covers go through the same steps before a browser sees
+them. Each address may make 12 cover changes a minute. The host never
+downloads art itself.
+
+Covers are fetched with the room token and shown from memory, so only players
+in the room see them, and only by game id.
 
 ### Choose and switch games
 
@@ -541,8 +574,8 @@ the host in its environment and stay out of its log. `SOFA_GAMES` is the
 library folder, with one subfolder per console. `SOFA_BIOS` has the layout of
 `runtime/system`: PS1 BIOS files at the top and PS2 BIOS files in `pcsx2/bios/`.
 The host links them into its writable system folder, because the PS2 core
-writes its own files next to the BIOS. Saves, memory cards and those files go
-in the `data` volume.
+writes its own files next to the BIOS. Saves, memory cards, uploaded covers
+and those files go in the `data` volume.
 
 Ports published, TCP only:
 

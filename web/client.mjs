@@ -56,24 +56,120 @@ function renderSlots(){
   if(controlReady())connected(mine>=0?'Player '+(mine+1)+' connected':'Watching',true);
 }
 // With no game running, players stay connected and the screen asks for a console and game.
-// "Change game" opens the same list over a running game. Browsers only ever get titles and ids.
-let pickerOpen=false,library=null,libraryAt=0,picking=false,pickerDrawn='',bootChosen=false;
-async function loadLibrary(){if(!library||performance.now()-libraryAt>15000){libraryAt=performance.now();try{const fresh=await api('library');if(!bootChosen)$('boot-screen').checked=fresh.bootScreen;library=fresh;}catch(e){message(e.message);}}renderLibrary();}
+// "Change game" opens the same list over a running game. Browsers only ever get titles, ids and covers.
+let pickerOpen=false,library=null,libraryAt=0,picking=false,pickerDrawn='',bootChosen=false,consoleFilter='all',coverFor=null;
+const coverURLs=new Map(),coverQueue=[];let coverLoads=0;
+async function loadLibrary(force=false){if(force||!library||performance.now()-libraryAt>15000){libraryAt=performance.now();try{const fresh=await api('library');if(!bootChosen)$('boot-screen').checked=fresh.bootScreen;library=fresh;}catch(e){message(e.message);}}renderLibrary();}
+// Covers need the room token, which an <img src> cannot send: fetch them and show blob URLs, a few at a time.
+function coverKey(game){return game.id+':'+game.cover.version;}
+function showCover(game){const url=coverURLs.get(coverKey(game));if(!url)return;for(const art of document.querySelectorAll(`#library [data-art="${game.id}"]`)){if(art.querySelector('img')?.src===url)continue;const img=new Image();img.alt='';img.src=url;art.replaceChildren(img);art.classList.remove('placeholder');}}
+function queueCover(game){if(coverURLs.has(coverKey(game))){showCover(game);return;}if(!coverQueue.some(g=>coverKey(g)===coverKey(game)))coverQueue.push(game);void loadCovers();}
+async function loadCovers(){
+  while(coverLoads<4&&coverQueue.length&&token){const game=coverQueue.shift(),key=coverKey(game);coverLoads++;
+    fetch('api/cover?id='+encodeURIComponent(game.id),{headers:{Authorization:'Bearer '+token}}).then(async r=>{if(!r.ok)return;
+      const url=URL.createObjectURL(await r.blob());for(const [old,u] of coverURLs)if(old.startsWith(game.id+':')){URL.revokeObjectURL(u);coverURLs.delete(old);}coverURLs.set(key,url);showCover(game);
+    }).catch(()=>{}).finally(()=>{coverLoads--;void loadCovers();});}
+}
+function forgetCovers(){coverQueue.length=0;coverURLs.forEach(u=>URL.revokeObjectURL(u));coverURLs.clear();}
+function folded(text){return text.normalize('NFD').replace(/\p{M}/gu,'').toLocaleLowerCase();}
+// Search and the console filter only hide cards, so typing never redraws the list or moves the focus.
+function filterLibrary(){
+  const query=folded($('game-search').value.trim());let shown=0;
+  for(const box of $('library').children){
+    const match=consoleFilter==='all'||box.dataset.console===consoleFilter;let inBox=0;
+    for(const card of box.querySelectorAll('.game')){const on=match&&(!query||folded(card.dataset.title).includes(query));card.hidden=!on;if(on)inBox++;}
+    box.hidden=!match||(Boolean(query)&&!inBox);shown+=inBox;
+  }
+  for(const chip of $('console-filter').children)chip.setAttribute('aria-pressed',String(chip.dataset.console===consoleFilter));
+  const total=(library?.consoles||[]).reduce((n,c)=>n+c.games.length,0);
+  $('no-match').hidden=!total||shown>0;$('no-match').textContent=query?'No games match “'+$('game-search').value.trim()+'”.':'No games for this console.';
+}
+function placeholder(art,game,item){art.classList.add('placeholder');const c=document.createElement('b'),t=document.createElement('span');c.textContent=item.id.toUpperCase();t.textContent=game.title;art.replaceChildren(c,t);}
 function renderLibrary(){
   const host=roomState?.host,list=$('library'),busy=picking||Boolean(host?.loading),can=Boolean(roomState?.canPick);
   const drawn=JSON.stringify([library,host?.game,host?.loading,host?.error,can,busy,roomState?.adminPin]);if(drawn===pickerDrawn)return;pickerDrawn=drawn;
   $('admin').hidden=can||!roomState?.adminPin;$('stop-game').hidden=!can||!host?.game;$('close-picker').hidden=!host?.game;
   $('picker-eyebrow').textContent=host?.loading?'STARTING':host?.game?'NOW PLAYING · '+host.game.title.toUpperCase():'NO GAME RUNNING';
   $('picker-note').textContent=host?.loading?'Starting '+host.loading+'… Everyone stays in the room.':host?.error&&!host.game?host.error:!library?.consoles.length?'The host has no game library. Start the host with --library to choose games here.':can?(host?.game?'Switching stops this game and saves its memory card first.':'Everyone stays in the room while a game starts.'):roomState?.adminPin?'The host chooses the game. Enter the host PIN to choose one yourself.':'The host has not started a game yet.';
-  $('boot-option').hidden=!can||!library?.consoles.some(c=>c.bootScreen);list.replaceChildren();
-  for(const item of library?.consoles||[]){
-    const box=document.createElement('section'),title=document.createElement('h3'),games=document.createElement('div');box.className='console';games.className='games';title.textContent=item.name;box.append(title);
+  $('boot-option').hidden=!can||!library?.consoles.some(c=>c.bootScreen);
+  const consoles=library?.consoles||[],focusedId=list.contains(document.activeElement)?document.activeElement.closest('.game')?.dataset.id:null;
+  if(!consoles.some(c=>c.id===consoleFilter))consoleFilter='all';
+  $('picker-tools').hidden=!consoles.some(c=>c.games.length);
+  $('console-filter').hidden=consoles.length<2;$('console-filter').replaceChildren(...(consoles.length<2?[]:[{id:'all',name:'All'},...consoles]).map(c=>{
+    const b=document.createElement('button');b.type='button';b.dataset.console=c.id;b.textContent=c.id==='all'?'All':c.id.toUpperCase();b.title=c.name;
+    b.addEventListener('click',()=>{consoleFilter=c.id;filterLibrary();});return b;}));
+  list.replaceChildren();
+  for(const item of consoles){
+    const box=document.createElement('section'),title=document.createElement('h3'),games=document.createElement('div');box.className='console';box.dataset.console=item.id;games.className='games';title.textContent=item.name;box.append(title);
     const notes=[item.warning,item.available&&!item.bootScreen?'No boot screen for '+item.name+' on this host.':null].filter(Boolean);
     if(notes.length){const p=document.createElement('p');p.textContent=notes.join(' ');box.append(p);}
     if(item.available&&!item.games.length){const p=document.createElement('p');p.textContent='No games in this folder yet.';box.append(p);}
-    for(const game of item.games){const b=document.createElement('button');b.type='button';b.textContent=game.title+(host?.game?.id===game.id?' · playing':'');b.disabled=!can||busy;b.addEventListener('click',()=>pick(game,item));games.append(b);}
+    for(const game of item.games){
+      const card=document.createElement('div'),b=document.createElement('button'),art=document.createElement('span'),name=document.createElement('span'),playing=host?.game?.id===game.id;
+      card.className='game'+(playing?' playing':'');card.dataset.id=game.id;card.dataset.title=game.title;
+      b.type='button';b.className='pick';b.disabled=!can||busy;b.setAttribute('aria-label',(playing?'Playing: ':'Play ')+game.title);
+      art.className='art';art.dataset.art=game.id;art.setAttribute('aria-hidden','true');name.className='name';name.textContent=game.title;
+      placeholder(art,game,item);b.append(art,name);
+      if(playing){const tag=document.createElement('em');tag.textContent='PLAYING';b.append(tag);}
+      b.addEventListener('click',()=>pick(game,item));card.append(b);
+      if(can&&library.covers){
+        const tools=document.createElement('div'),change=document.createElement('button');tools.className='cover-tools';
+        change.type='button';change.textContent=game.cover?'Change cover':'Add cover';change.setAttribute('aria-label',change.textContent+' for '+game.title);
+        change.addEventListener('click',()=>{coverFor=game;$('cover-file').value='';$('cover-file').click();});tools.append(change);
+        if(game.cover?.uploaded){const remove=document.createElement('button');remove.type='button';remove.textContent='Remove';remove.setAttribute('aria-label','Remove the cover for '+game.title);
+          remove.addEventListener('click',()=>removeCover(game));tools.append(remove);}
+        card.append(tools);
+      }
+      games.append(card);
+    }
     box.append(games);list.append(box);
   }
+  filterLibrary();
+  for(const item of consoles)for(const game of item.games)if(game.cover)queueCover(game);  // now the cards are in the page
+  if(focusedId)list.querySelector(`.game[data-id="${focusedId}"] .pick:enabled`)?.focus();
+}
+async function uploadCover(game,file){
+  if(file.size>5*1024*1024){message('Use an image of at most 5 MB.');return;}
+  message('Uploading the cover for '+game.title+'…');
+  try{const r=await fetch('api/cover?id='+encodeURIComponent(game.id),{method:'POST',headers:{Authorization:'Bearer '+token,'Content-Type':file.type||'application/octet-stream'},body:file});
+    if(!r.ok)throw new Error((await r.text()).slice(0,240));message('Cover saved for '+game.title+'.');}catch(e){message(e.message);}
+  await loadLibrary(true);
+}
+async function removeCover(game){
+  if(!confirm('Remove the cover for '+game.title+'?'))return;
+  try{await api('cover/remove',{id:game.id});message('Cover removed for '+game.title+'.');}catch(e){message(e.message);}
+  await loadLibrary(true);
+}
+$('cover-file').addEventListener('change',()=>{const file=$('cover-file').files[0];if(file&&coverFor)void uploadCover(coverFor,file);coverFor=null;});
+$('game-search').addEventListener('input',filterLibrary);
+// Arrow keys and a gamepad's D-pad move between cards by position; Enter, Space or the pad's ✕ button picks.
+function pickerTargets(){return [...$('game-picker').querySelectorAll('button:enabled,input:not([type=checkbox]):not([hidden])')].filter(e=>e.offsetParent&&!e.closest('[hidden]'));}
+function moveFocus(dx,dy){
+  const items=pickerTargets(),from=document.activeElement;if(!items.length)return;
+  if(!items.includes(from)){(items.find(e=>e.classList.contains('pick'))||items[0]).focus();return;}
+  const a=from.getBoundingClientRect(),ax=a.left+a.width/2,ay=a.top+a.height/2;let best=null,score=Infinity;
+  for(const e of items){if(e===from)continue;const b=e.getBoundingClientRect(),x=b.left+b.width/2-ax,y=b.top+b.height/2-ay,along=dx?x*dx:y*dy,across=dx?Math.abs(y):Math.abs(x);
+    if(along<=1)continue;const s=along+across*3;if(s<score){score=s;best=e;}}
+  if(best){best.focus();best.scrollIntoView({block:'nearest'});}
+}
+const arrows={ArrowLeft:[-1,0],ArrowRight:[1,0],ArrowUp:[0,-1],ArrowDown:[0,1]};
+$('game-picker').addEventListener('keydown',event=>{
+  const search=event.target===$('game-search');
+  if(search&&event.key==='Escape'&&event.target.value){event.target.value='';filterLibrary();event.preventDefault();return;}
+  if(!(event.key in arrows)||(search&&event.key!=='ArrowDown')||event.target.tagName==='INPUT'&&!search)return;
+  event.preventDefault();moveFocus(...arrows[event.key]);
+});
+const padNav={held:'',at:0};
+function pollPicker(){
+  if($('game-picker').hidden||!focused){padNav.held='';return;}
+  const pad=selectedPad();if(!pad||pad.mapping!=='standard')return;
+  const b=n=>pad.buttons[n]?.pressed,x=pad.axes[0]||0,y=pad.axes[1]||0;
+  const dir=b(12)||y<-.5?'up':b(13)||y>.5?'down':b(14)||x<-.5?'left':b(15)||x>.5?'right':'';
+  const held=dir||(b(0)?'pick':b(1)?'back':''),now=performance.now();
+  if(held!==padNav.held){padNav.held=held;padNav.at=now+350;}else if(!dir||now<padNav.at)return;else padNav.at=now+140;
+  if(dir)moveFocus(...{up:[0,-1],down:[0,1],left:[-1,0],right:[1,0]}[dir]);
+  else if(held==='pick'&&$('game-picker').contains(document.activeElement)&&document.activeElement.tagName==='BUTTON')document.activeElement.click();
+  else if(held==='back'&&!$('close-picker').hidden)$('close-picker').click();
 }
 async function pick(game,item){
   const host=roomState?.host;if(host?.game&&!confirm('Switch to '+game.title+'? '+host.game.title+' stops for everyone and its memory card is saved.'))return;
@@ -82,7 +178,7 @@ async function pick(game,item){
 }
 function renderGame(){
   const game=roomState?.host.game,show=Boolean(token&&roomState&&(!game||pickerOpen));
-  $('change-game').hidden=!token||!game||!roomState?.canPick&&!roomState?.adminPin;$('game-picker').hidden=!show;
+  $('change-game').hidden=!token||!game||!roomState?.canPick&&!roomState?.adminPin;$('game-picker').hidden=!show;$('screen').classList.toggle('picking',show);
   if(show)void loadLibrary();
 }
 async function refresh(){
@@ -91,7 +187,7 @@ async function refresh(){
   catch(e){message(e.message);}finally{polling=false;}
 }
 async function leaveRoom(notify=true){
-  clearInput();const old=token;token=null;mine=-1;roomState=null;
+  clearInput();const old=token;token=null;mine=-1;roomState=null;forgetCovers();library=null;pickerDrawn='';
   if(old)try{await fetch('api/leave',{method:'POST',headers:{Authorization:'Bearer '+old,'Content-Type':'application/json'},body:'{}'});}catch{}
   const oldPC=pc;pc=null;channel=null;if(oldPC)oldPC.close();
   const oldSocket=socket;socket=null;fallbackReady=false;if(oldSocket)oldSocket.close();
@@ -236,7 +332,7 @@ document.querySelectorAll('[data-button]').forEach(button=>{
   const release=event=>{touches.delete(event.pointerId);if(![...touches.values()].includes(Number(button.dataset.button)))button.classList.remove('pressed');sendInput();};
   button.addEventListener('pointerup',release);button.addEventListener('pointercancel',release);button.addEventListener('lostpointercapture',release);
 });
-function pollController(){sendInput();requestAnimationFrame(pollController);}requestAnimationFrame(pollController);
+function pollController(){sendInput();pollPicker();requestAnimationFrame(pollController);}requestAnimationFrame(pollController);
 setInterval(()=>sendInput(),100);
 setInterval(()=>{send({t:'ping',sent:performance.now()});void refresh();},1000);
 setInterval(async()=>{

@@ -187,6 +187,7 @@ simple-log
 def command(env, ice):
     args = [sys.executable, str(ROOT/'server.py'), '--library', setting(env, 'SOFA_LIBRARY', '/games'),
             '--system', setting(env, 'SOFA_SYSTEM', '/data/system'), '--saves', setting(env, 'SOFA_SAVES', '/data/saves'),
+            '--covers', setting(env, 'SOFA_COVERS', '/data/covers'),
             '--host', '0.0.0.0', '--port', '8081']
     if setting(env, 'SOFA_TRUSTED_PROXY'):
         args += ['--trusted-proxy', setting(env, 'SOFA_TRUSTED_PROXY')]
@@ -206,6 +207,7 @@ def main(env=os.environ):
             raise Refused(f'No game library at {library}: mount it, with one subfolder per console')
         linked = link_bios(setting(env, 'SOFA_BIOS', '/bios'), setting(env, 'SOFA_SYSTEM', '/data/system'))
         Path(setting(env, 'SOFA_SAVES', '/data/saves')).mkdir(parents=True, exist_ok=True)
+        Path(setting(env, 'SOFA_COVERS', '/data/covers')).mkdir(parents=True, exist_ok=True)
         ice = relay_files(env, setting(env, 'SOFA_TURN_STATE', '/turn'))
         args = command(env, ice)
     except Refused as error:

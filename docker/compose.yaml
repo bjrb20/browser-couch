@@ -85,5 +85,5 @@ networks:
         - subnet: ${SOFA_SUBNET:-172.31.251}.0/29
 
 volumes:
-  data:  # saves, memory cards and the PS2 console's own files
+  data:  # saves, memory cards, uploaded cover art and the PS2 console's own files
   turn:  # the relay password and configuration
