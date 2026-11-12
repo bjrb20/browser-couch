@@ -282,9 +282,8 @@ class Emulator:
         if not self._signature('retro_load_game', [C.POINTER(GameInfo)], C.c_bool)(C.byref(self.game_info)):
             raise RuntimeError('The core could not load the game. Check the file, its CUE paths and the BIOS.')
         if self.hub.players > self.ports:
-            raise RuntimeError(f'This core reads {self.ports} pads, not {self.hub.players}.'
-                               + (' Build the multitap core with ./tools/build-pcsx2-multitap.sh.'
-                                  if self.profile.multitap_core else ''))
+            raise RuntimeError(f'This core reads {self.ports} pads, not {self.hub.players}. '
+                               f'Download a newer one with ./setup.sh --console {self.profile.key}.')
         for port in range(self.ports):
             self._signature('retro_set_controller_port_device', [C.c_uint, C.c_uint])(port, 1 if port < self.hub.players else 0)
         av = AVInfo()

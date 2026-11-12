@@ -21,9 +21,9 @@ class ProfileTests(unittest.TestCase):
         self.assertEqual(options['pcsx2_renderer'], b'OpenGL')
         self.assertEqual(options['pcsx2_fastboot'], b'disabled')
         self.assertNotIn('pcsx_rearmed_multitap', options)
-        self.assertEqual(options['pcsx2_multitap'], b'disabled', 'the multitap is off for two players')
-        self.assertEqual(profile.options('port 1')['pcsx2_multitap'], b'port 1')
-        self.assertEqual((profile.default_players, profile.max_players), (2, 4))
+        self.assertEqual(options['pcsx2_multitap'], b'port 1', 'four players on a multitap in port 1')
+        self.assertEqual(profile.options('disabled')['pcsx2_multitap'], b'disabled')
+        self.assertEqual((profile.default_players, profile.max_players), (4, 4))
 
     def test_missing_bios_is_reported_until_a_dump_is_present(self):
         with tempfile.TemporaryDirectory() as system:
@@ -69,7 +69,7 @@ class ProfileTests(unittest.TestCase):
     def test_status_names_the_console(self):
         emulator = Emulator('core.so', 'game.elf', 'system', 'saves', InputHub(2), profile=PROFILES['ps2'])
         status = emulator.status()
-        self.assertEqual((status['system'], status['console'], status['multitap']), ('ps2', 'PS2', 'none'))
+        self.assertEqual((status['system'], status['console'], status['multitap']), ('ps2', 'PS2', 'port 1'))
         self.assertEqual(status['renderer'], 'software')
 
 

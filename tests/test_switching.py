@@ -548,13 +548,11 @@ class LauncherTests(TestCase):
         self.assertEqual((core.name, players, multitap), (core_filename(core='pcsx_rearmed'), 4, 'port 1'))
         self.assertEqual(Launcher('s', 'saves', self.cores, 2).plan(self.game('ps1', 'ps1'))[1:], (2, 'disabled'))
 
-    def test_ps2_reads_four_pads_only_with_the_multitap_core(self):
-        launcher = Launcher('s', 'saves', self.cores, 4)
-        self.assertEqual(launcher.plan(self.game('ps2', 'ps2'))[1:], (2, 'disabled'))
-        (self.cores/core_filename(core='pcsx2_multitap')).write_bytes(b'')
-        core, players, multitap = launcher.plan(self.game('ps2', 'ps2'))
-        self.assertEqual((core.name, players, multitap), (core_filename(core='pcsx2_multitap'), 4, 'port 1'))
-        self.assertEqual(launcher.plan(self.game('ps2', 'ps2-play'))[1:], (2, None))
+    def test_ps2_has_four_players_on_the_stock_core_multitap(self):
+        core, players, multitap = Launcher('s', 'saves', self.cores).plan(self.game('ps2', 'ps2'))
+        self.assertEqual((core.name, players, multitap), (core_filename(core='pcsx2'), 4, 'port 1'))
+        self.assertEqual(Launcher('s', 'saves', self.cores, 2).plan(self.game('ps2', 'ps2'))[1:], (2, 'disabled'))
+        self.assertEqual(Launcher('s', 'saves', self.cores, 4).plan(self.game('ps2', 'ps2-play'))[1:], (2, None))
 
     def test_each_game_saves_in_its_own_folder_and_ps2_cards_follow(self):
         launcher = Launcher('s', 'saves', self.cores)

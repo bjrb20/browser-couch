@@ -919,8 +919,8 @@ def main():
                              '(default: $SOFA_METADATA). ScreenScraper reads its credentials from the environment')
     parser.add_argument('--state', help='Optional host-side emulator snapshot to restore')
     parser.add_argument('--multitap', choices=PROFILES['ps1'].multitaps,
-                        help='Default: port 1 on PS1; on PS2, port 1 for more than two players')
-    parser.add_argument('--players', type=int, choices=range(2, 5), help='Default: 4 for PS1, 2 for PS2')
+                        help='Default: port 1 for more than two players, else disabled')
+    parser.add_argument('--players', type=int, choices=range(2, 5), help='Default: 4')
     parser.add_argument('--core-option', action='append', default=[], metavar='KEY=VALUE',
                         help='Override a core option, for example pcsx2_renderer=OpenGL')
     parser.add_argument('--host', default='127.0.0.1', help='Use 0.0.0.0 to accept LAN browsers')
@@ -950,8 +950,8 @@ def main():
     players = args.players or profile.default_players
     if players > profile.max_players:
         parser.error(f'{profile.key} supports at most {profile.max_players} players')
-    if not args.multitap and profile.multitap and players > 2:
-        args.multitap = 'port 1'
+    if not args.multitap and profile.multitap:
+        args.multitap = 'port 1' if players > 2 else 'disabled'
     if args.multitap == 'disabled' and players > 2:
         parser.error('More than two players require a multitap')
     if any('=' not in option for option in args.core_option):
@@ -1011,10 +1011,7 @@ def start_disc(parser, args, profile, hub):
         parser.error(missing)
     elif missing:
         print(missing, flush=True)
-    tapped = profile.multitap_core and args.multitap not in (None, 'disabled')
-    core = args.core or ROOT/'runtime/cores'/core_filename(core=profile.multitap_core if tapped else profile.core)
-    if not Path(core).is_file() and tapped and not args.core:
-        parser.error(f'No core at {core}. A PS2 multitap needs it. Build it with: ./tools/build-pcsx2-multitap.sh')
+    core = args.core or ROOT/'runtime/cores'/core_filename(core=profile.core)
     if not Path(core).is_file():
         parser.error(f'No core at {core}. Download it with: ./setup.sh --console {profile.key}')
     emulator = Emulator(core, args.disc, args.system, args.saves, hub, args.multitap, args.state,

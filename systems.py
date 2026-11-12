@@ -20,7 +20,6 @@ class Profile:
     platforms: tuple = ('Linux', 'Darwin')
     pad: str = 'pad'
     analog: bool = False  # the pad has sticks; the page then sends them
-    multitap_core: str = ''  # a core build that reads the multitap slots, when the usual one does not
     library: str = ''  # the --library subfolder for this console's games
     extensions: tuple = ()  # game files the library lists; files a CUE or M3U names are left out
     bios_files: tuple = ()  # BIOS dumps the core looks for in runtime/system itself, when it has no folder
@@ -87,14 +86,14 @@ PROFILES = {profile.key: profile for profile in (
     Profile(
         key='ps2', name='PS2', core='pcsx2', pad='PS2 pad', analog=True,
         content='Path to a PS2 disc image (ISO, CHD, CSO or CUE) or a homebrew ELF',
-        max_players=4, default_players=2,
+        max_players=4, default_players=4,
         variables={
             'pcsx2_renderer': 'Software (SW)',
             'pcsx2_fastboot': 'enabled',
         },
-        # The official build reads two pads and has no multitap; tools/build-pcsx2-multitap.sh adds it.
-        multitap='pcsx2_multitap', multitaps=('disabled', 'port 1', 'port 2', 'ports 1 and 2'),
-        multitap_core='pcsx2_multitap',
+        # Players 1-4 are the four slots of a multitap in console port 1. A game
+        # that reads only two pads then sees player 1 alone.
+        multitap='pcsx2_multitap', multitaps=('port 1', 'disabled', 'port 2', 'ports 1 and 2'),
         bios='pcsx2/bios', bios_required=True,
         library='ps2', extensions=('.iso', '.chd', '.cso', '.cue', '.elf'),
         # Memory cards in the game's own save folder, not one pair shared by every game.

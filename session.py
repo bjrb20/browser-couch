@@ -31,17 +31,11 @@ class Launcher:
     boot_screen: bool = True  # --no-boot-screen; a pick can still choose either
 
     def plan(self, game):
-        """Core path, players and multitap for a game. A PS2 multitap needs its own core build."""
+        """Core path, players and multitap for a game."""
         profile = PROFILES[game.profile]
         players = min(self.players or profile.default_players, profile.max_players)
-        tapped = players > 2 and profile.multitap
-        core = Path(self.cores)/core_filename(core=profile.multitap_core if tapped and profile.multitap_core else profile.core)
-        if tapped and profile.multitap_core and not core.is_file():
-            # Without the multitap build PCSX2 reads two pads.
-            players, tapped = 2, False
-            core = Path(self.cores)/core_filename(core=profile.core)
-        multitap = 'port 1' if tapped else ('disabled' if profile.multitap else None)
-        return core, players, multitap
+        multitap = ('port 1' if players > 2 else 'disabled') if profile.multitap else None
+        return Path(self.cores)/core_filename(core=profile.core), players, multitap
 
     def save_folder(self, game):
         """One folder per game: its memory cards and saves stay apart from every other game's."""

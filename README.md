@@ -536,8 +536,8 @@ Each library game saves in its own folder,
 instead of in one pair shared by every game. A `--disc` game still saves in
 `runtime/saves/`.
 
-PS1 library games use four slots on the multitap, as with `--disc`. PS2 games
-use two, or four when the multitap core is built (see "PS2"). `--players` and
+PS1 and PS2 library games use four slots on a multitap in port 1, as with
+`--disc` (see "PS2" for games that read only two pads). `--players` and
 `--core-option` apply to every library game.
 
 Everyone in the room sees what the chooser is doing, in a strip below the
@@ -635,9 +635,9 @@ automatically. See the [official core documentation](https://docs.libretro.com/l
 - Enable sound with the button below the stream. Leaving, losing focus or
   hiding the tab clears that browser's controller. The shared game continues.
 
-The default is a multitap on PS1 port 1 and four browser slots. If a game does
+The default is a multitap in port 1 and four browser slots. If a game does
 not recognize the controllers, test `--multitap 'port 2'`. For a normal two-pad
-setup use `--players 2 --multitap disabled`.
+setup use `--players 2`, which leaves the multitap out.
 
 ## PS2 (experimental)
 
@@ -664,23 +664,22 @@ homebrew ELF:
 ./run.sh --console ps2 --disc ~/Games/game/GAME.iso --host 0.0.0.0
 ```
 
-PS2 rooms have two player slots by default. The keyboard, touch and gamepad
+PS2 rooms have four player slots, as PS1 rooms do. The keyboard, touch and gamepad
 buttons are the same as PS1. The gamepad sticks are the analog sticks. On the
 keyboard, WASD and the arrows move the sticks, and TFGH is the D-pad. Use
 `--core-option KEY=VALUE` to change a core option, for example
 `--core-option pcsx2_renderer=OpenGL` on a Linux host with a GPU.
 
-The official PCSX2 core reads two pads and has no multitap. For three or four
-players, build a patched core once:
+The four slots are a multitap in console port 1, set with the core's
+`pcsx2_multitap` option. The official core has had that option since the end of
+October 2026; an older download reads two pads and stops with a message. Run
+`./setup.sh --console ps2` again to replace it.
 
-1. Run `./tools/build-pcsx2-multitap.sh`. The build takes a long time and uses
-   half of the CPU cores at low priority.
-2. Start the host with `--players 4`. The host then uses
-   `runtime/cores/pcsx2_multitap_libretro.dylib` and a multitap on port 1.
-
-Only games that support the multitap use the extra players. If a game does not
-find the controllers, try `--multitap 'port 2'`. The patch is
-`patches/pcsx2-multitap.patch`.
+Player 1 is the multitap's first slot, which every game reads. Players 2 to 4
+are its other slots, so only games that support the multitap see them. A game
+that reads only two pads sees player 1 alone, and its two-player modes can be
+greyed out. `--players 2` puts player 2 in console port 2 for such a game, but
+it applies to every game the host starts.
 
 Platform notes:
 
@@ -981,7 +980,5 @@ launcher selects the OS-specific core filename automatically.
 
 ## License
 
-MIT; see [LICENSE](LICENSE). The one exception is
-`patches/pcsx2-multitap.patch`, a change to the PCSX2 libretro core, which is
-GPL-3.0 like that core. Emulator cores, BIOS files and games are not included;
-use only games and BIOS files that you own.
+MIT; see [LICENSE](LICENSE). Emulator cores, BIOS files and games are not
+included; use only games and BIOS files that you own.
