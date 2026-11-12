@@ -22,6 +22,7 @@ import logging
 import os
 import re
 import time
+import unicodedata
 from urllib.parse import quote, urlsplit
 
 import covers as cover_art
@@ -111,12 +112,72 @@ def libretro_name(name):
     return re.sub(r'[&*/:`<>?\\|]', '_', name)
 
 
+LANGUAGES = re.compile(r'\((?:[A-Z][a-z][,+ ]*)+\)')  # (En,Fr,De) or (EnFrDe), not (Europe) or (Rev 1)
+
+
+def loose_name(name):
+    """A name for matching when the exact one fails.
+
+    No language list, no [...] tags, no accents, case, spaces or punctuation:
+    "Name (Europe) (EnFrDe) [SLES-00001]" and "Na-me (Europe) (En,Fr)" agree.
+    The region, disc and edition tags stay, so a different release does not.
+    """
+    name = LANGUAGES.sub('', re.sub(r'\[[^\[\]]*\]', '', name))
+    name = unicodedata.normalize('NFKD', name)
+    return ''.join(char for char in name.casefold() if char.isalnum())
+
+
 class Libretro(Provider):
     name = 'libretro'
     interval = 0.5
     BASE = 'https://raw.githubusercontent.com/libretro-thumbnails'
     SYSTEMS = {'ps1': 'Sony - PlayStation', 'ps2': 'Sony - PlayStation 2'}
     KINDS = ('Named_Boxarts', 'Named_Titles', 'Named_Snaps')
+    TREES = 'https://api.github.com/repos/libretro-thumbnails'
+    INDEX_AGE = 24*3600  # seconds a file list is kept
+
+    def __init__(self, http):
+        super().__init__(http)
+        self.indexes = {}  # (repo, kind or None) -> (time, {loose name: file name} or {folder: tree sha})
+
+    async def tree(self, repo, sha):
+        """One folder of the repository from GitHub's API: {name: (type, sha)}."""
+        await self.pace()
+        status, body = await self.http.get(f'{self.TREES}/{quote(repo)}/git/trees/{quote(sha)}')
+        if status in (403, 429) or status >= 500:
+            raise ProviderError("GitHub is limiting requests for libretro's file list: try again later")
+        if status != 200:
+            return {}
+        try:
+            return {item['path']: (item['type'], item['sha']) for item in json.loads(body)['tree']}
+        except (ValueError, KeyError, TypeError):
+            raise ProviderError("libretro's file list could not be read") from None
+
+    async def index(self, repo, kind):
+        """{loose name: file name} for one kind of image, fetched once a day: two requests per console."""
+        cached = self.indexes.get((repo, kind))
+        if cached and time.time()-cached[0] < self.INDEX_AGE:
+            return cached[1]
+        root = self.indexes.get((repo, None))
+        if not root or time.time()-root[0] >= self.INDEX_AGE:
+            root = self.indexes[(repo, None)] = (time.time(), await self.tree(repo, 'master'))
+        folder = root[1].get(kind)
+        files = await self.tree(repo, folder[1]) if folder and folder[0] == 'tree' else {}
+        index = {}
+        for path in sorted(files):
+            if path.lower().endswith('.png'):
+                index.setdefault(loose_name(path[:-4]), path)
+        self.indexes[(repo, kind)] = (time.time(), index)
+        return index
+
+    async def download(self, repo, kind, file):
+        await self.pace()
+        status, body = await self.http.get(f'{self.BASE}/{quote(repo)}/master/{kind}/{quote(file)}')
+        if status == 200 and body:
+            return body
+        if status == 429 or status >= 500:
+            raise ProviderError('libretro-thumbnails is busy: try again later')
+        return None
 
     @staticmethod
     def names(game):
@@ -134,13 +195,15 @@ class Libretro(Provider):
         repo = system.replace(' ', '_')
         for kind in self.KINDS:
             for name in self.names(game):
-                await self.pace()
-                status, body = await self.http.get(f'{self.BASE}/{quote(repo)}/master/{kind}/'
-                                                   f'{quote(libretro_name(name))}.png')
-                if status == 200 and body:
+                body = await self.download(repo, kind, libretro_name(name)+'.png')
+                if body:
                     return Found(art=body)
-                if status == 429 or status >= 500:
-                    raise ProviderError('libretro-thumbnails is busy: try again later')
+            # Not under its exact name: look for the same name, spelt a little differently, in the file list.
+            file = (await self.index(repo, kind)).get(loose_name(game.title))
+            if file:
+                body = await self.download(repo, kind, file)
+                if body:
+                    return Found(art=body)
         return None
 
 

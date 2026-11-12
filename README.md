@@ -394,7 +394,13 @@ the page shows the results as they arrive.
   long.
 - **Names.** libretro-thumbnails names its files after the No-Intro or Redump
   name with ``& * / : ` < > ? \ |`` replaced by `_`. The host does the same, so
-  a library named that way matches. Other names usually do not.
+  a library named that way matches. When no file has the exact name, the host
+  asks GitHub for the list of libretro's file names for that console and kind
+  (two requests, kept for a day) and looks for a near match: one that differs
+  only in the language list (`(EnFrDe)`, `(En,Ja,Fr,De)` or none), `[...]`
+  tags such as a serial, spacing, punctuation, case or accents. The region,
+  disc number, revision and other `(...)` tags must still be the same, so a
+  near match is never another region or a demo disc.
 - **Cache.** What a provider returns is kept in `--covers DIR/fetched/` as
   `<game id>.jpg` and `<game id>.json`, re-encoded like an upload. It is not
   fetched again unless someone asks for that game. A game that a provider did

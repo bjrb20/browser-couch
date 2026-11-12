@@ -13,7 +13,7 @@ from covers import Covers
 from inputs import InputHub
 from library import Game, Library
 import metadata
-from metadata import Fetcher, Libretro, ProviderError, ScreenScraper, libretro_name, serial
+from metadata import Fetcher, Libretro, ProviderError, ScreenScraper, libretro_name, loose_name, serial
 from server import Room, make_app
 from session import Session
 
@@ -110,19 +110,77 @@ class LibretroTests(IsolatedAsyncioTestCase):
         http = FakeHttp(('Named_Snaps/Puzzle Quest (Europe).png', 200, b'snap'))
         found = await quick(Libretro(http)).lookup(game())
         self.assertEqual(found.art, b'snap')
-        kinds = [url.split('/')[6] for url, _ in http.requests]
+        kinds = [url.split('/')[6] for url, _ in http.requests if url.startswith(Libretro.BASE)]
         self.assertEqual(kinds, ['Named_Boxarts']*2 + ['Named_Titles']*2 + ['Named_Snaps']*2)
 
     async def test_ps2_repository_sanitised_names_and_nothing_found(self):
         http = FakeHttp()
         self.assertIsNone(await quick(Libretro(http)).lookup(game('Fight: Club (USA)', 'ps2')))
-        self.assertTrue(all('/Sony_-_PlayStation_2/' in url and 'Fight_%20Club' in url for url, _ in http.requests))
+        raw = [url for url, _ in http.requests if url.startswith(Libretro.BASE)]
+        self.assertTrue(raw and all('/Sony_-_PlayStation_2/' in url and 'Fight_%20Club' in url for url in raw))
+        self.assertTrue(all('/Sony_-_PlayStation_2/' in url for url, _ in http.requests))
         self.assertTrue(all(params == {} for _, params in http.requests))
         self.assertIsNone(await Libretro(FakeHttp()).lookup(game(console='other')))
 
     async def test_busy_server_is_an_error(self):
         with self.assertRaises(ProviderError):
+            await quick(Libretro(FakeHttp(('git/trees', 403, b'rate limited')))).lookup(game())
+        with self.assertRaises(ProviderError):
             await quick(Libretro(FakeHttp(('', 503, b'')))).lookup(game())
+
+
+def trees(*files, kind='Named_Boxarts'):
+    """GitHub API answers for a repository with these image files in one folder."""
+    root = dict(tree=[dict(path=name, type='tree', sha=name.lower()) for name in Libretro.KINDS]
+                + [dict(path='.gitignore', type='blob', sha='ignore')])
+    folder = dict(tree=[dict(path=name, type='blob', sha=str(n)) for n, name in enumerate(files)], truncated=False)
+    return (('git/trees/master', 200, json.dumps(root).encode()),
+            (f'git/trees/{kind.lower()}', 200, json.dumps(folder).encode()))
+
+
+class LooseMatchTests(IsolatedAsyncioTestCase):
+    def test_loose_names_ignore_languages_spacing_punctuation_and_tags(self):
+        for ours, theirs in (('Canyon Racer (Europe) (EnFrDeEsIt)', 'Canyon Racer (Europe) (En,Fr,De,Es,It)'),
+                             ('SkyBall Z - Hyper Cup (Europe, Australia) (En,Ja,Fr)',
+                              'Sky Ball Z - Hyper Cup (Europe, Australia) (En,Fr)'),
+                             ('Moon Saga - Idainaru Densetsu (Japan) [SLPS-00001]', 'Moon Saga - Idai naru Densetsu (Japan)'),
+                             ('Cafe: Story (USA)', 'Café_ Story (USA)')):
+            with self.subTest(ours=ours):
+                self.assertEqual(loose_name(ours), loose_name(theirs))
+        for ours, theirs in (('Canyon Racer (Europe)', 'Canyon Racer (USA)'),
+                             ('Canyon Racer (Europe) (En,Fr)', 'Canyon Racer (Europe) (En,Fr) (Demo)'),
+                             ('Canyon Racer (Europe) (Disc 1)', 'Canyon Racer (Europe) (Disc 2)'),
+                             ('Canyon Racer 2 (Europe)', 'Canyon Racer (Europe)')):
+            with self.subTest(ours=ours):
+                self.assertNotEqual(loose_name(ours), loose_name(theirs))
+
+    async def test_falls_back_to_the_file_list(self):
+        theirs = 'Sky Ball Z - Hyper Cup (Europe, Australia) (En,Fr).png'
+        http = FakeHttp(*trees('Sky Ball Z - Hyper Cup (USA).png', theirs, 'Other (Europe).png'),
+                        ('Named_Boxarts/'+theirs, 200, b'box'), ('Named_Boxarts/Other (Europe).png', 200, b'other'))
+        provider = quick(Libretro(http))
+        found = await provider.lookup(game('SkyBall Z - Hyper Cup (Europe, Australia) (En,Ja,Fr)', 'ps2'))
+        self.assertEqual(found.art, b'box')
+        urls = [url for url, _ in http.requests]
+        self.assertEqual(urls[-3:], [
+            'https://api.github.com/repos/libretro-thumbnails/Sony_-_PlayStation_2/git/trees/master',
+            'https://api.github.com/repos/libretro-thumbnails/Sony_-_PlayStation_2/git/trees/named_boxarts',
+            'https://raw.githubusercontent.com/libretro-thumbnails/Sony_-_PlayStation_2/master/Named_Boxarts/'
+            'Sky%20Ball%20Z%20-%20Hyper%20Cup%20%28Europe%2C%20Australia%29%20%28En%2CFr%29.png'])
+        # The file list is kept: a second game costs no more list requests.
+        self.assertEqual((await provider.lookup(game('Other (Europe) (EnFr)', 'ps2'))).art, b'other')
+        self.assertEqual(sum('api.github.com' in url for url, _ in http.requests), 2)
+
+    async def test_box_art_from_the_list_before_an_exact_title_screen(self):
+        http = FakeHttp(*trees('Canyon Racer (Europe) (En,Fr).png'),
+                        ('Named_Titles/Canyon Racer (Europe) (EnFr).png', 200, b'title'),
+                        ('Named_Boxarts/Canyon Racer (Europe) (En,Fr).png', 200, b'box'))
+        self.assertEqual((await quick(Libretro(http)).lookup(game('Canyon Racer (Europe) (EnFr)'))).art, b'box')
+
+    async def test_another_region_is_not_a_match(self):
+        http = FakeHttp(*trees('Canyon Racer (USA).png'))
+        self.assertIsNone(await quick(Libretro(http)).lookup(game('Canyon Racer (Europe)')))
+        self.assertFalse(any('Racer%20%28USA' in url for url, _ in http.requests))
 
 
 class ScreenScraperTests(IsolatedAsyncioTestCase):
