@@ -70,6 +70,9 @@ in `/lan/` is necessary. The page adds it if a player leaves it out.
 3. You get the first open player slot. To change, click a different open slot.
 4. Click **Enable sound** below the picture.
 5. Keep the tab in front. If you change tabs, your controller releases.
+6. If the page reloads, or you close the tab and come back, you rejoin by
+   yourself with the same name and slot (if nobody took it meanwhile). Untick
+   **Remember this device** on a shared computer.
 
 Use the left hand to move and the right hand for the buttons.
 
@@ -92,9 +95,43 @@ Use the left hand to move and the right hand for the buttons.
 A standard USB or Bluetooth gamepad works on the tailnet URL. Xbox, PS4 and PS5
 controllers use the PlayStation layout: A is Cross, B is Circle, X is Square and
 Y is Triangle. Connect the gamepad, then push a button while the tab is in front.
-If the page says that it does not know the layout, use Chrome, Edge or Safari. On a phone, use the touch buttons below
-the picture. Tap **Fullscreen** to put the buttons over the picture. Tap **✕** to
-leave fullscreen.
+If the page says that it does not know the layout, use Chrome, Edge or Safari.
+
+### On a phone
+
+The page fits a phone in portrait and landscape at normal zoom, with no
+sideways scrolling. Buttons are at least 44 px tall, and text fields use 16 px
+text so the phone does not zoom in when you tap one.
+
+- **Portrait:** the picture fills the width and the touch buttons sit below it.
+  Tap **Fullscreen** to put the buttons over the picture.
+- **Landscape:** while a game runs, the picture fills the screen by itself, with
+  the D-pad, shoulder buttons and Select on the left and the face buttons,
+  shoulder buttons and Start on the right. Tap **✕** to go back to the page,
+  for example to tap **Enable sound** or watch the host's games list. The page
+  then shows the picture at the size that fits. It fills the screen again the
+  next time you turn the phone.
+
+#### Switching apps, locking the phone and network drops
+
+The page reconnects by itself and keeps your slot, name and host controls:
+
+- **When it reconnects:** when you come back to the tab (from another app, the
+  lock screen or the browser's page cache), when the phone gets its network
+  back, and whenever the stream drops: the connection fails or closes, the
+  picture track ends, or no new frame arrives for 8 seconds. A page in the
+  background waits until you come back, so it uses no data while hidden.
+- While it works, the picture shows **Reconnecting…**. Failed tries repeat
+  after 1, 2, 4… up to 30 seconds. Tap **Reconnect** below the picture to try
+  at once, or any time the picture looks stuck.
+- Back on the page, it starts the video and sound again, since phones often
+  pause them in the background.
+- **Away more than about 30 seconds:** the host lets the slot go. A remembered
+  device rejoins by itself and takes the slot back if it is still free. A
+  device that is not remembered shows the join form with your name filled in,
+  so you only type the room code.
+- If someone took your slot meanwhile, you come back watching and the page
+  says so. A player the host removed stays out.
 
 ### LAN on plain HTTP
 
@@ -113,8 +150,8 @@ cause. Then use the tailnet URL.
 ### Tailnet
 
 `tailscale serve` gives a tailnet-only HTTPS URL with a trusted certificate.
-It proxies to `127.0.0.1:8081`. The host trusts `X-Forwarded-Proto` and
-`X-Forwarded-For` only from loopback, so joins pass the same-origin check.
+It proxies to `127.0.0.1:8081`. The host always trusts `X-Forwarded-Proto`
+and `X-Forwarded-For` from loopback, so joins pass the same-origin check.
 WebRTC media goes directly to the host's tailnet IP over UDP. If UDP cannot
 connect, the client uses the WebSocket stream over the HTTPS port. That stream
 is slower. If the tailnet ACLs block UDP, ask the admins to allow a fixed range
@@ -297,6 +334,326 @@ address in System Settings → Network. Keep the terminal
 running. Ctrl+C stops the game and saves the emulated memory card in
 `runtime/saves/`.
 
+Without `--disc`, the host starts with no game. Players can still join and
+take slots, and the page asks for a console and a game.
+
+### Game library
+
+`--library DIR` lists the games in `DIR`, with one subfolder per console:
+
+```text
+DIR/ps1/Canyon Racer/GAME.cue   with its BIN tracks
+DIR/ps1/Saga.m3u                for a multi-disc game, with its discs
+DIR/ps2/Demo.iso                ISO, CHD, CSO, CUE or a homebrew ELF
+```
+
+The PS1 folder lists CUE, CHD, PBP and M3U files. The tracks that a CUE
+names and the discs that an M3U names are not listed separately. A game alone
+in its own folder takes the folder's name. Files and folders that start with
+a dot are skipped.
+
+The page shows each title without its trailing groups in brackets, so
+`Canyon Racer (Europe) [SLES-01234]` shows as `Canyon Racer`. Files are not
+renamed, and the save folder keeps the full name. If two games of a console
+would show the same title, both keep their full names.
+
+The host prints each console and its number of games at startup. A console
+whose core is missing, whose core does not run on this platform, or whose
+required BIOS is missing lists no games, only a warning. PS2 games use PCSX2
+when its BIOS is present, otherwise Play!. A PS1 without a BIOS runs on the
+core's built-in HLE BIOS, with a warning.
+
+Browsers get only the console names, game titles, ids and cover art. They
+never get file paths, discs, ROMs or BIOS files.
+
+### Games screen and cover art
+
+The list is one row of cards, every console together, in A–Z order by title:
+case and accents do not matter, a leading "The" is skipped, and numbers sort
+by value (2 before 10). The row scrolls sideways. On a phone, swipe it; it
+settles on a card's edge. With a mouse, the wheel over the row moves it
+sideways, and the page scrolls as usual once the row reaches an end or the
+pointer is elsewhere. The ‹ and › buttons above it move one screenful of
+cards, and are greyed out at the ends; the count beside them reads, for
+example, "1–5 of 23". A console's notes (a missing BIOS, an empty folder)
+show above the row.
+
+The search box filters the row as you type; case and accents do not matter.
+With more than one console, the buttons beside it show one console or all.
+Either one goes back to the start of the row. Arrow keys, or a gamepad's D-pad
+and left stick, move between cards and scroll the row to keep the card in
+view; Enter, Space or the pad's ✕ picks; ○ goes back to a running game.
+
+A game's card shows its cover, from one of these, the first that exists:
+
+1. An image uploaded on the page. Players who may choose games (see "Choose
+   and switch games") get "Add cover", "Change cover" and "Remove" on each
+   card. The host checks that right for every change, not only the page.
+2. `cover.jpg`, `cover.jpeg` or `cover.png` in the game's own folder in the
+   library, for example `DIR/ps1/Canyon Racer/cover.jpg`. A cover in a console
+   folder itself would belong to every game there, so it is ignored.
+3. Art fetched online, only when the host turns that on (see "Online cover
+   art and details").
+
+Without any of them, the card shows the console and title. Removing an upload shows
+the library cover again; the host never writes to the library.
+
+Uploads go in `--covers DIR` (default `runtime/covers/`; `/data/covers` in the
+container), as `<game id>.jpg`, with the same id as the saves, so a cover stays
+with its game when a title changes. The host takes JPEG, PNG or WebP of at
+most 5 MB, recognised by their content, not their name. It decodes the image,
+applies its orientation, scales it to fit 600 × 900 pixels and saves it as a
+new JPEG with no metadata (no EXIF, location, camera, comment or colour
+profile). Library covers go through the same steps before a browser sees
+them. Each address may make 12 cover changes a minute. Unless the host turns
+on online art, it never downloads any.
+
+Covers are fetched with the room token and shown from memory, so only players
+in the room see them, and only by game id.
+
+### Online cover art and details
+
+Off by default. `--metadata` (in the container, `SOFA_METADATA`) names the
+providers to try, in order:
+
+| Provider | Gives | Needs |
+|---|---|---|
+| `libretro` | Box art from the [libretro-thumbnails](https://github.com/libretro-thumbnails) repositories: the box, else the title screen, else a screenshot | Nothing |
+| `screenscraper` | Box art, description, year, genre, number of players and publisher from [ScreenScraper](https://www.screenscraper.fr/) | Developer credentials and, for usable quotas, a user account |
+| `igdb` | Box art, description, year, genre, number of players and publisher from [IGDB](https://www.igdb.com/), matched by name | A free Twitch developer application (client id and secret) |
+
+```sh
+./run.sh --library DIR --metadata libretro,screenscraper
+./run.sh --library DIR --metadata libretro,igdb
+```
+
+Nothing is fetched until a player who may choose games asks. They get "Fetch
+art" on each card ("Fetch again" once it was looked up) and "Fetch missing
+art and details" above the row. That queues every game with no cover that was
+never looked up, and every game still without a description whose last fetch
+came before a provider was added to `--metadata` (for example art from
+libretro, fetched before IGDB was set up). The host checks that right, as for uploads. Requests go out
+one at a time in the background and never hold up the page or a running game;
+the page shows the results as they arrive.
+
+- **What is sent.** libretro: the game's original folder or file name, as it
+  is on disk before the page drops its `(...)` and `[...]` tags, and its
+  console, in the file's URL. ScreenScraper: that name with its file
+  extension, a disc serial if the name has one in a tag (for example
+  `[SLUS-00001]`), the console, and the credentials. Nothing about the players
+  or this host, and no file hashes: hashing whole disc images would take too
+  long. IGDB: the title as the page shows it (without its `(...)` and `[...]`
+  tags), and the IGDB platform number of its console, with the app's client
+  id and access token.
+- **Names.** libretro-thumbnails names its files after the No-Intro or Redump
+  name with ``& * / : ` < > ? \ |`` replaced by `_`. The host does the same, so
+  a library named that way matches. When no file has the exact name, the host
+  asks GitHub for the list of libretro's file names for that console and kind
+  (two requests, kept for a day) and looks for a near match: one that differs
+  only in the language list (`(EnFrDe)`, `(En,Ja,Fr,De)` or none), `[...]`
+  tags such as a serial, spacing, punctuation, case or accents. The region,
+  disc number, revision and other `(...)` tags must still be the same, so a
+  near match is never another region or a demo disc.
+- **Cache.** What a provider returns is kept in `--covers DIR/fetched/` as
+  `<game id>.jpg` and `<game id>.json`, re-encoded like an upload. It is not
+  fetched again unless someone asks for that game. A game that a provider did
+  not know is remembered too, with the providers that were asked, so "Fetch
+missing art and details" does not ask that provider again. A failure
+  (no network, a quota) is not, and shows as a short note on the card.
+- **An upload always wins.** Fetched art is shown only when there is no
+  upload and no library cover, and fetching never changes either.
+- **Details.** Each one is optional: description, year, genre, number of
+  players and publisher, kept by game id with the art. libretro gives images
+  only. The year and genre show on the card, a description adds an "About"
+  button, and all of them show in "Now playing".
+- **Your own details win.** A player who may choose games can set the
+  description, year and genre of the running game by hand ("Edit details" in
+  "Now playing"). The host checks that right, caps the description at 2,000
+  characters and the genre at 60, takes a year from 1940 to 2099, and keeps the
+  text plain: control and formatting characters are dropped, and the page
+  shows it as text, never as markup. Edits are kept in
+  `--covers DIR/edited/<game id>.json`, apart from what a provider found, so
+  fetching again never changes them. Emptying a field shows the fetched one
+  again.
+
+**IGDB.** Free for non-commercial use under the Twitch Developer Services
+Agreement; ask IGDB about a partnership for commercial use. Register an
+application in the Twitch developer console (any OAuth redirect, for example
+`http://localhost`, and the "Confidential" client type), then set:
+
+| Variable | Value |
+|---|---|
+| `SOFA_IGDB_CLIENT_ID` | The application's client id. Required. |
+| `SOFA_IGDB_CLIENT_SECRET` | The application's client secret. Required. |
+
+The host signs in with Twitch's client-credentials flow, sending the secret
+in the body of an HTTPS request, never in a URL, and keeps the access token
+in memory only, until shortly before it expires (about two months). Neither
+is logged or sent to a browser. Requests go one at a time, at most about three
+a second (IGDB allows four, with eight open). When told it is going too fast
+it slows down; when Twitch or IGDB refuses the credentials it stops until the
+host restarts.
+
+How a game is matched:
+
+- It searches for the clean title on the game's console only (PlayStation or
+  PlayStation 2), then for the title with `: ` in place of ` - `, then for the
+  part after the last ` - ` alone, then for its last three words. IGDB's search
+  wants whole words, so a romanised title with a word split in two (`Idai naru`
+  for `Idainaru`) finds nothing by its full name.
+- It takes a result only when it is sure: the result's name or one of its
+  alternative names (where IGDB keeps Japanese titles and other spellings) is
+  the same once spacing, punctuation, case and accents are dropped, or is the
+  same with a prefix such as a series name (`007 - Name` and `Series 007:
+  Name`). A sequel or a longer title that only starts the same is never taken.
+  Of two results with the same name, the main game wins over a port or an
+  edition.
+- Otherwise it shows nothing, and keeps up to five results for an admin. The
+  card says "Not sure which game this is: choose the match".
+- **Choosing the match.** A player who may choose games gets "Match" on each
+  card. It shows the match, with a link to its IGDB page, or the candidates to
+  pick from. They can also type the number of any IGDB game (the `id` on its
+  page), set "No match" to fetch nothing from IGDB for that game, or go back to
+  "Match by name". The host checks that right and the number, drops what was
+  fetched for the game (art included) and fetches it again. Uploads and your
+  own details stay. Picks are kept in `--covers DIR/matched/<game id>.json`.
+
+The year is the first release date, the genre the first two genres, the
+publisher the companies IGDB marks as publisher, and the number of players
+the most local players of the game's multiplayer modes on that console ("1"
+for a single-player-only game). Cover images come from IGDB's own image host
+at 528 × 748. As with the other providers, the art belongs to each game's
+developers and publishers: keep it for your own library.
+
+**libretro-thumbnails.** No account or key. The repositories state no licence
+for the images: the art belongs to each game's developers and publishers.
+Keep it for your own library and do not publish it.
+
+**ScreenScraper.** Its API needs two sets of credentials: developer
+credentials (an id and password for the software, which ScreenScraper gives
+out on request on its forum) and a user account (free, at screenscraper.fr).
+Its terms allow the API only in free software, and it closes accounts that
+break them. Set them in the host's environment, never in a file in this
+repository:
+
+| Variable | Value |
+|---|---|
+| `SOFA_SCREENSCRAPER_DEVID` | Developer id. Required. |
+| `SOFA_SCREENSCRAPER_DEVPASSWORD` | Developer password. Required. |
+| `SOFA_SCREENSCRAPER_USER` | Your user name. Optional, but without an account ScreenScraper may refuse requests or allow very few. |
+| `SOFA_SCREENSCRAPER_PASSWORD` | Your password. |
+
+The host identifies itself as `SofaLink` (`softname`) and follows the limits
+each answer gives for the account: it sends one request at a time (the
+smallest thread limit) and spaces them to the per-minute limit. It stops
+until the next day at the daily quota or the daily limit of unknown games,
+slows down when told it is going too fast, and stops for the session if the
+API refuses the credentials or is closed. ScreenScraper sends its credentials
+in the request URL, over HTTPS; the host never logs them.
+
+### Choose and switch games
+
+```sh
+./run.sh --library "/path/to/games" --host 0.0.0.0
+./run.sh --library "/path/to/games" --admin-pin 2468   # only players with the PIN choose
+```
+
+With no game running, the page lists the games. Without `--admin-pin`, any
+player in the room may choose. With it, a player enters the PIN once to
+unlock choosing for their browser. "Change game" below the stream opens the
+list over a running game. "Stop the game" goes back to the list.
+
+Switching stops the running game and writes its memory card, then starts the
+next game. Nobody leaves the room: the room code, the stream and every player's
+slot stay. When the next console reads fewer pads, players in the slots it
+lacks become viewers. Only one game starts at a time.
+
+Each library game saves in its own folder,
+`runtime/saves/<console>/<title> [<id>]/`. PS2 memory cards are kept there too,
+instead of in one pair shared by every game. A `--disc` game still saves in
+`runtime/saves/`.
+
+PS1 and PS2 library games use four slots on a multitap in port 1, as with
+`--disc`. Each PS2 game's card has a "Multitap" button for players who may
+choose games, so a game can start with two pads instead (see "PS2").
+`--players` and `--core-option` apply to every library game; for a PS2 game
+the card's choice decides the player count.
+
+Everyone in the room sees what the chooser is doing, in a strip below the
+stream that never covers it:
+
+- **Choosing.** "Ann is choosing a game…" while a player who may choose has
+  the list open over a running game, or is using it while no game runs. The
+  name is the one the room already shows.
+- **Watching.** Other players follow the chooser's list live and read-only,
+  with no click: it opens by itself when the chooser opens or starts using the
+  list, opens straight away for a player who joins meanwhile, and closes when
+  the chooser closes it, picks a game (then "Starting" takes over) or
+  disconnects.
+  - While no game runs, it takes over the player's own games list: the search
+    text and the list filtering as it is typed, the console filter, the
+    scroll, the game under the chooser's pointer or keyboard focus, and the
+    pick. A labelled pointer follows the chooser's mouse; it hides when the
+    pointer leaves the list or stops for a few seconds, and a touch screen
+    sends none. On a different layout (a phone watching a desktop) it follows
+    the chooser by game card rather than by position. With reduced motion the
+    pointer jumps instead of gliding.
+  - Over a running game, the same live list (pointer, search, filtering,
+    scroll, hover and pick) is docked under the strip instead: in the side
+    column on a desktop, below the touch controls on a phone. It never covers
+    the stream, and it takes no clicks, focus or keys, so the game keeps the
+    keyboard, gamepad and touch controls.
+  - It never takes focus. A player typing in a field (the PIN, say) or using
+    their own list gets a one-line summary rather than the list.
+  - "Hide" folds it to one line for this choosing session; "Show" opens it
+    again. The next time someone opens the list, it opens again.
+- **Starting.** The game's clean title and cover, and who chose it, from the
+  pick until the console's boot screen has played. Then it clears.
+- **Stopped.** Who stopped which game, for a few seconds.
+
+The host keeps this state. Only a player who may choose can say they are
+choosing, updates are rate-limited, and a list that stops reporting (a closed
+tab, a lost connection) is forgotten after 15 seconds. It shows names, titles
+and covers players can already see, never a path.
+
+Watching goes over the room's own connection, about 100 bytes at a time, at
+most 20 times a second and only when something changed. Only the fields above
+are sent: the search box's text, never key presses, and never the host PIN or
+any other field. The host passes on only a player who may choose, one at a
+time (a second open list is not shown), drops anything else in the message,
+limits how often it may change, and ends it when the list closes, the chooser
+leaves or their connection drops, or it goes quiet for 5 seconds (a list that
+goes quiet is no longer shown as choosing either). An update that arrives after
+the pick is ignored, so the pick stays picked out until "Starting" shows.
+
+### Now playing
+
+While a game runs, a "Now playing" panel shows its cover, clean title, console,
+how long it has been running and who has which player slot. It also shows any
+details the game has (see above). With only a cover, a title and a console, it
+shows just those. It sits beside the stream on a wide screen, and below the
+stream and the touch controls on a phone, where it starts folded. It never
+covers the game. It follows the game as it switches and goes away when the
+game stops. It shows players nothing the games screen and the slots do not.
+
+### Boot screen
+
+Library games play the console's own boot screen before the game. Untick
+"Play the console's boot screen first" in the list to skip it for one start,
+or start the host with `--no-boot-screen` to make that the default.
+
+- **PS1** shows the Sony logo and the licence screen, about 11 seconds. This
+  needs a BIOS dump in `runtime/system/`: the built-in HLE BIOS has no boot
+  screen, so without a dump the list says there is none. The core warns that
+  showing the boot logo may reduce compatibility with some games; untick it if a
+  game fails to start.
+- **PS2 with PCSX2** turns fast boot off and shows the console's boot animation,
+  about 12 seconds longer than with fast boot.
+- **PS2 with Play!** has no boot screen. The list says so.
+
+A `--core-option` (`pcsx_rearmed_show_bios_bootlogo`, `pcsx2_fastboot`)
+overrides the choice.
+
 The initial test used the core's built-in HLE BIOS, which froze a game when a
 two-player session started. Put a compatible BIOS dump (for example
 `scph1001.bin`, lowercase) in `runtime/system/`; the core selects it
@@ -317,9 +674,61 @@ automatically. See the [official core documentation](https://docs.libretro.com/l
 - Enable sound with the button below the stream. Leaving, losing focus or
   hiding the tab clears that browser's controller. The shared game continues.
 
-The default is a multitap on PS1 port 1 and four browser slots. If a game does
+### Remembered devices
+
+When you join, **Remember this device** (on by default) lets a refresh, a
+crash or a reopened tab come straight back into the room, with no room code:
+
+- Same name. Same player slot, if it is still free; otherwise the first open
+  one, and the page says so.
+- Host controls too, if this device unlocked them with the host PIN.
+- **Leave** keeps the device remembered but does not rejoin by itself: the
+  page offers **Rejoin** and **Forget this device**.
+- **Log out and forget this device** (below the controls) ends it everywhere on
+  the host. **Lock host controls** drops only the host rights.
+
+How it works:
+
+- The host sets two cookies, `sofa_link_player` and `sofa_link_admin`, each a
+  random 256-bit token. They are `HttpOnly` (no script on the page can read
+  them), `SameSite=Strict`, and `Secure` over HTTPS. They are only ever swapped
+  at `/api/resume` for the short-lived connection token the page already used.
+- The host keeps an HMAC-SHA256 of each token, keyed with the code that issued
+  it (the room code for players, the host PIN for host rights), never the token
+  itself. The file holds nothing that logs anyone in, and nothing to test a
+  guessed code against.
+- A player login lasts 30 days from its last use. Host rights last 7 days from
+  when the host PIN was typed, however often they are used.
+- Changing `SOFA_PIN` logs out every remembered player. Changing
+  `SOFA_ADMIN_PIN` removes every remembered device's host rights.
+- The records live in `remembered-devices.json` in the saves folder (mode 0600,
+  at most 500 records), so they survive a restart or a new build. Delete the
+  file to log everyone out.
+
+### Move players (host)
+
+After the host PIN, **Manage players** lists everyone in the room and their
+slot. Each person has a **Move…** menu and a **Remove** button, with 44 px
+targets on a phone. It works during a game:
+
+- **Player N (open):** move them to a free slot.
+- **Player N (swap with X):** swap two players.
+- **Player N (instead of X):** seat someone who was watching; X then watches.
+- **Watching (free the slot):** free their slot.
+- **Remove:** take them out of the room and forget their device. They need the
+  room code to come back.
+
+The players who moved see "You are now Player N" over the picture at once,
+including in the full-window phone view. Their keyboard, gamepad and touch
+buttons drive the new slot and take its colour, and any buttons they were
+holding are let go. The live view of the host's games list belongs to whoever
+is choosing, not to a slot, so it carries on for everyone; it ends if the
+chooser is removed. The host checks the host rights on every
+change, and a room started without a host PIN has no seat controls.
+
+The default is a multitap in port 1 and four browser slots. If a game does
 not recognize the controllers, test `--multitap 'port 2'`. For a normal two-pad
-setup use `--players 2 --multitap disabled`.
+setup use `--players 2`, which leaves the multitap out.
 
 ## PS2 (experimental)
 
@@ -346,23 +755,34 @@ homebrew ELF:
 ./run.sh --console ps2 --disc ~/Games/game/GAME.iso --host 0.0.0.0
 ```
 
-PS2 rooms have two player slots by default. The keyboard, touch and gamepad
-buttons are the same as PS1. The gamepad sticks are the analog sticks. On the
+PS2 rooms have four player slots, as PS1 rooms do, or two with the multitap
+off (see below). The keyboard, touch and gamepad buttons are the same as
+PS1. The gamepad sticks are the analog sticks. On the
 keyboard, WASD and the arrows move the sticks, and TFGH is the D-pad. Use
 `--core-option KEY=VALUE` to change a core option, for example
 `--core-option pcsx2_renderer=OpenGL` on a Linux host with a GPU.
 
-The official PCSX2 core reads two pads and has no multitap. For three or four
-players, build a patched core once:
+The four slots are a multitap in console port 1, set with the core's
+`pcsx2_multitap` option. The official core has had that option since the end of
+October 2026; an older download reads two pads and stops with a message. Run
+`./setup.sh --console ps2` again to replace it.
 
-1. Run `./tools/build-pcsx2-multitap.sh`. The build takes a long time and uses
-   half of the CPU cores at low priority.
-2. Start the host with `--players 4`. The host then uses
-   `runtime/cores/pcsx2_multitap_libretro.dylib` and a multitap on port 1.
+Player 1 is the multitap's first slot, which every game reads. Players 2 to 4
+are its other slots, so only games that support the multitap see them. A game
+that reads only two pads sees player 1 alone, and its two-player modes can be
+greyed out. For such a game, press its card's "Multitap" button before picking
+it, so it reads "Multitap off: 2 players": the game then starts with two
+slots, on console ports 1 and 2. Only players who may choose games see the
+button.
 
-Only games that support the multitap use the extra players. If a game does not
-find the controllers, try `--multitap 'port 2'`. The patch is
-`patches/pcsx2-multitap.patch`.
+- **The default.** On, unless the game's details give a number of players of
+  two at most (for example "1-2"); a game with no details starts on. Fetch
+  the details with a provider that gives players, such as IGDB.
+- **The choice is kept.** Pressing the button saves the choice for that game
+  in `--covers DIR/multitap/<game id>.json`, so it outlasts a restart; it
+  always wins over the default. Without a covers folder the host keeps it
+  until it stops.
+- It applies to library games only; with `--disc`, use `--players 2`.
 
 Platform notes:
 
@@ -411,6 +831,26 @@ The room code controls joining, and each browser receives a separate session
 token. Use HTTPS or a trusted VPN when carrying the room over the internet.
 Internet deployment has not yet been tested.
 
+### HTTPS reverse proxy on another machine
+
+A proxy on another machine (for example HAProxy on the router) that ends HTTPS
+and forwards plain HTTP must be named with `--trusted-proxy`. Without it the
+host sees a plain-HTTP request, the browser's `https://` origin does not match,
+and joining fails with "Use the host page to join".
+
+```sh
+./run.sh --library "/path/to/games" --host 0.0.0.0 --trusted-proxy 192.0.2.10
+./run.sh ... --trusted-proxy 192.0.2.0/24,198.51.100.4   # several, comma-separated
+```
+
+The proxy must send `X-Forwarded-Proto: https` and `X-Forwarded-For`. If it
+rewrites the `Host` header, it must also send `X-Forwarded-Host` with the name
+that browsers use. The host honours these headers only from the listed
+addresses and from loopback. From any other address they are ignored, so a
+browser cannot forge them. Name the proxy's exact address where you can,
+rather than a whole LAN. The proxy must also pass WebSocket upgrades for
+`/api/socket`.
+
 For WebRTC across NAT, supply `--ice-config /path/to/ice.json`. The file is a
 standard array of ICE server objects; STUN discovers reachable addresses, while
 TURN can relay media when direct connections fail. Supply your own service and
@@ -422,6 +862,74 @@ The current chat cloud environment cannot expose this running emulator to your
 browser: it has no supported inbound port, configured VPN, or media relay.
 The earlier static preview hosts the native prototype, not this streaming
 service. No working cloud join URL is claimed for this host.
+
+### Run it as a container
+
+`docker/compose.yaml` runs the game host and a TURN relay
+([coturn](https://github.com/coturn/coturn)) as one stack. The image holds
+Sofa Link and the PS1 and PS2 cores, fetched at build time. It holds no BIOS
+and no games: you mount your own, read-only.
+
+```sh
+cd docker
+cp sofa-link.env.example sofa-link.env   # not committed
+chmod 600 sofa-link.env
+# Edit it: the PINs, the game and BIOS folders, the proxy address, the relay name.
+docker compose --env-file sofa-link.env up -d --build
+docker compose --env-file sofa-link.env logs -f sofa-link
+```
+
+The stack refuses to start without `SOFA_PIN` (at least 8 characters) and
+`SOFA_ADMIN_PIN` (at least 6, different from the room code). The PINs reach
+the host in its environment and stay out of its log. `SOFA_GAMES` is the
+library folder, with one subfolder per console. `SOFA_BIOS` has the layout of
+`runtime/system`: PS1 BIOS files at the top and PS2 BIOS files in `pcsx2/bios/`.
+The host links them into its writable system folder, because the PS2 core
+writes its own files next to the BIOS. Saves, memory cards, uploaded covers,
+fetched art and those files go in the `data` volume. Online cover art stays off
+unless you set `SOFA_METADATA`; see "Online cover art and details" for it and
+the ScreenScraper variables.
+
+Ports published, TCP only:
+
+| Variable | Default | Use |
+|---|---|---|
+| `SOFA_WEB_PORT` | 8081 | The page. Point the HTTPS reverse proxy here. |
+| `SOFA_TURN_PORT` | 3478 | The relay, plain TCP. The reverse proxy adds TLS. |
+
+No UDP port is published. The relay sends media only to the game host, over
+the stack's own network (`SOFA_SUBNET.0/29`), so its UDP ports stay inside.
+
+**Reverse proxy.** Docker keeps the client's source address on a published
+port, so the host sees the proxy's own LAN address. Set `SOFA_TRUSTED_PROXY`
+to that address (see "HTTPS reverse proxy on another machine"). The proxy
+needs two front ends:
+
+- HTTPS for the page, forwarding to `SOFA_WEB_PORT` with `X-Forwarded-Proto:
+  https` and `X-Forwarded-For`, and passing WebSocket upgrades.
+- TLS over TCP for the relay, for example port 5349, forwarding the decrypted
+  TCP stream to `SOFA_TURN_PORT`. Set `SOFA_TURN_PUBLIC_HOST` to its name and
+  `SOFA_TURN_PUBLIC_PORT` to its port. Browsers get
+  `turns:turn.example.org:5349?transport=tcp`.
+
+With `SOFA_TURN_PUBLIC_HOST` empty, the relay still runs, but browsers are
+not offered it. `SOFA_TURN_LAN_HOST` also offers LAN browsers the plain TCP
+port. The host makes the relay password once and keeps it in the `turn`
+volume. Set `SOFA_TURN_NEW_PASSWORD=1` for one start to make a new one.
+
+Both services run as `SOFA_UID:SOFA_GID` (the owner of the game and BIOS
+files) with a read-only root filesystem, no capabilities (the relay keeps
+only the one its binary needs to start), CPU and memory limits, and a
+healthcheck. In Portainer, create a stack from this repository with
+`docker/compose.yaml` as the compose path, and add the variables from
+`sofa-link.env.example` as the stack's environment variables.
+
+Update:
+
+```sh
+git pull
+docker compose --env-file sofa-link.env up -d --build
+```
 
 ## Implementation and verification
 
@@ -575,7 +1083,5 @@ launcher selects the OS-specific core filename automatically.
 
 ## License
 
-MIT; see [LICENSE](LICENSE). The one exception is
-`patches/pcsx2-multitap.patch`, a change to the PCSX2 libretro core, which is
-GPL-3.0 like that core. Emulator cores, BIOS files and games are not included;
-use only games and BIOS files that you own.
+MIT; see [LICENSE](LICENSE). Emulator cores, BIOS files and games are not
+included; use only games and BIOS files that you own.

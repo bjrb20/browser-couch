@@ -25,6 +25,7 @@ from emulator import Emulator
 from fetch_core import core_filename
 from inputs import InputHub
 from server import Room, make_app
+from session import Session
 import tracer
 
 
@@ -48,7 +49,7 @@ async def main():
     ice = json.loads(Path(ice_path).read_text()) if ice_path else []
     # A policy-managed Chromium can block direct UDP; an unmanaged browser does not.
     webrtc = os.environ.get('QA_TRANSPORT', 'webrtc' if ice else 'websocket') == 'webrtc'
-    room = Room(emulator, 'qa-canyon', ice)
+    room = Room(Session(emulator.hub, emulator, disc.stem), 'qa-canyon', ice)
     runner = web.AppRunner(make_app(room))
     await runner.setup()
     site = web.TCPSite(runner, '127.0.0.1', 0)

@@ -25,6 +25,7 @@ from playwright.async_api import async_playwright
 
 from latency_probe import ProbeCore
 from server import Room, make_app
+from session import Session
 
 SELECTED_PAIR = '''async () => {
     const stats = await streamRoom.pc.getStats(), byId = new Map();
@@ -51,7 +52,7 @@ async def main():
     host = args.host or ice[0]['urls'][0].split(':')[1]
     core = ProbeCore()
     core.task = asyncio.create_task(core.run())
-    runner = web.AppRunner(make_app(Room(core, 'probe-office', ice)))
+    runner = web.AppRunner(make_app(Room(Session(core.hub, core, 'Relay probe'), 'probe-office', ice)))
     await runner.setup()
     site = web.TCPSite(runner, host, 0)
     await site.start()

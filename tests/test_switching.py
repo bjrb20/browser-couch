@@ -1,0 +1,649 @@
+import asyncio
+import json
+from pathlib import Path
+import tempfile
+import threading
+import time
+from unittest import IsolatedAsyncioTestCase, TestCase, mock
+
+import aiohttp
+from aiohttp.test_utils import TestClient, TestServer
+from aiortc.codecs.opus import OpusEncoder
+
+from fetch_core import core_filename
+from inputs import InputHub
+from library import Game, Library
+from media import GameAudio
+import server
+from server import STARTED_FOR, Room, make_app
+from session import Launcher, Session, multitap_default
+
+from test_library import Host
+
+
+class FakeEmulator:
+    """Stands in for a libretro core: records start and stop, and can fail or hang on start."""
+    def __init__(self, log, title, rate=44100, fail=False, gate=None):
+        self.log, self.title, self.sample_rate, self.fail, self.gate = log, title, rate, fail, gate
+        self.thread = None
+        self.frame_at = None
+
+    def start(self):
+        self.log.append(('start', self.title))
+        if self.gate:
+            self.gate.wait(5)
+        if self.fail:
+            raise RuntimeError('No BIOS')
+
+    def stop(self):
+        self.log.append(('stop', self.title))
+
+    def status(self):
+        return dict(core='Fake', error=None)
+
+    def audio_queued(self):
+        return 0  # the track waits out its stall each chunk, as with a paused core
+
+    def audio_frame(self, count):
+        return b'\x10\x00\x20\x00'*count
+
+
+class FakeLauncher(Launcher):
+    def __init__(self, log, **kwargs):
+        super().__init__('system', 'saves', 'cores')
+        self.log, self.kwargs, self.built = log, kwargs, []
+
+    def plan(self, game, multitap=None):
+        self.planned = multitap
+        return None, 2 if game.console == 'ps2' else 4, None
+
+    def emulator(self, game, hub, boot_screen=None, multitap=None):
+        self.built.append(hub.players)
+        self.boot, self.multitap = boot_screen, multitap
+        return FakeEmulator(self.log, game.title, **self.kwargs.get(game.title, {}))
+
+
+def library(host):
+    host.core('pcsx_rearmed')
+    host.core('play')
+    host.file('ps1/Canyon Racer.cue')
+    host.file('ps2/Demo.elf')
+    return Library(host.library, host.system, host.cores, 'Linux').scan()
+
+
+def ids(library):
+    return {game.title: game.id for game in library.games.values()}
+
+
+class SwitchTests(IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.library = library(Host(self.temporary.name))
+        self.ids = ids(self.library)
+        self.log = []
+
+    async def room(self, admin_pin=None, **kwargs):
+        self.launcher = FakeLauncher(self.log, **kwargs)
+        room = Room(Session(InputHub(4)), 'qa-canyon', library=self.library, launcher=self.launcher,
+                    admin_pin=admin_pin)
+        client = TestClient(TestServer(make_app(room)))
+        await client.start_server()
+        self.addAsyncCleanup(client.close)
+        return room, client
+
+    async def join(self, client, name='Ann'):
+        joined = await (await client.post('/api/join', json=dict(pin='qa-canyon', name=name))).json()
+        return joined['token'], dict(Authorization='Bearer '+joined['token'])
+
+    async def test_pick_switch_and_stop_keep_players_and_their_slots(self):
+        room, client = await self.room()
+        ann, auth = await self.join(client)
+        bob, _ = await self.join(client, 'Bob')
+        room.hub.claim(ann, 0)
+        room.hub.claim(bob, 3)
+        response = await client.post('/api/game', json=dict(id=self.ids['Canyon Racer']), headers=auth)
+        self.assertEqual(response.status, 200)
+        state = await (await client.get('/api/state', headers=auth)).json()
+        self.assertEqual(state['host']['game'], dict(title='Canyon Racer', id=self.ids['Canyon Racer'], runningS=0))
+        self.assertTrue(state['canPick'])
+
+        # PS2 reads two pads: Bob's slot 4 goes, Ann keeps slot 1.
+        self.assertEqual((await client.post('/api/game', json=dict(id=self.ids['Demo']), headers=auth)).status, 200)
+        self.assertEqual(self.log, [('start', 'Canyon Racer'), ('stop', 'Canyon Racer'), ('start', 'Demo')])
+        self.assertEqual(room.hub.slots(), [ann, None])
+        self.assertEqual(self.launcher.built, [4, 2], 'the hub is resized before the emulator is built')
+
+        self.assertEqual((await client.post('/api/game', json=dict(id=self.ids['Canyon Racer']), headers=auth)).status, 200)
+        self.assertEqual(room.hub.slots(), [ann, None, None, None])
+        self.assertEqual((await client.post('/api/game/stop', headers=auth)).status, 200)
+        self.assertEqual(self.log[-1], ('stop', 'Canyon Racer'))
+        state = await (await client.get('/api/state', headers=auth)).json()
+        self.assertIsNone(state['host']['game'])
+        self.assertEqual(len(room.clients), 2, 'nobody was dropped')
+
+    async def test_a_game_that_fails_leaves_the_room_idle_with_the_error(self):
+        room, client = await self.room(**{'Demo': dict(fail=True)})
+        _, auth = await self.join(client)
+        await client.post('/api/game', json=dict(id=self.ids['Canyon Racer']), headers=auth)
+        response = await client.post('/api/game', json=dict(id=self.ids['Demo']), headers=auth)
+        self.assertEqual(response.status, 500)
+        self.assertIn('No BIOS', await response.text())
+        state = await (await client.get('/api/state', headers=auth)).json()
+        self.assertIsNone(state['host']['game'])
+        self.assertIn('Demo could not start', state['host']['error'])
+        self.assertEqual(self.log[-1], ('stop', 'Demo'), 'a failed start is cleaned up')
+
+    async def test_a_second_pick_while_a_game_starts_is_refused(self):
+        gate = threading.Event()
+        room, client = await self.room(**{'Canyon Racer': dict(gate=gate)})
+        _, auth = await self.join(client)
+        first = asyncio.create_task(client.post('/api/game', json=dict(id=self.ids['Canyon Racer']), headers=auth))
+        while not self.log:
+            await asyncio.sleep(.01)
+        state = await (await client.get('/api/state', headers=auth)).json()
+        self.assertEqual(state['host']['loading'], 'Canyon Racer')
+        self.assertEqual((await client.post('/api/game', json=dict(id=self.ids['Demo']), headers=auth)).status, 409)
+        self.assertEqual((await client.post('/api/game/stop', headers=auth)).status, 409)
+        gate.set()
+        self.assertEqual((await first).status, 200)
+
+    async def test_a_pick_can_skip_the_boot_screen(self):
+        room, client = await self.room()
+        _, auth = await self.join(client)
+        body = await (await client.get('/api/library', headers=auth)).json()
+        self.assertTrue(body['bootScreen'], 'on by default')
+        await client.post('/api/game', json=dict(id=self.ids['Demo'], bootScreen=False), headers=auth)
+        self.assertIs(self.launcher.boot, False)
+        await client.post('/api/game', json=dict(id=self.ids['Demo'], bootScreen='yes'), headers=auth)
+        self.assertIsNone(self.launcher.boot, 'anything else means the host default')
+
+    async def test_a_pick_chooses_the_multitap_for_the_slots_and_the_core(self):
+        demo, root = self.ids['Demo'], Path(self.temporary.name)
+        (root/'cores'/core_filename('Linux', 'pcsx2')).write_bytes(b'')  # PCSX2, not Play!
+        (root/'system/pcsx2/bios').mkdir(parents=True)
+        (root/'system/pcsx2/bios/console.bin').write_bytes(b'\0'*16)
+        room, client = await self.room(admin_pin='4321')
+        _, auth = await self.join(client)
+        listed = lambda body: {g['title']: g.get('multitap') for c in body['consoles'] for g in c['games']}
+        body = await (await client.get('/api/library', headers=auth)).json()
+        self.assertEqual(listed(body), {'Canyon Racer': None, 'Demo': True}, 'on with no details; PS1 has no choice')
+        response = await client.post('/api/game/multitap', json=dict(id=demo, on=False), headers=auth)
+        self.assertEqual(response.status, 403, 'it takes the right to choose games')
+        await client.post('/api/admin', json=dict(pin='4321'), headers=auth)
+        response = await client.post('/api/game/multitap', json=dict(id=demo, on=False), headers=auth)
+        self.assertEqual(response.status, 200)
+        body = await (await client.get('/api/library', headers=auth)).json()
+        self.assertEqual(listed(body)['Demo'], False)
+        await client.post('/api/game', json=dict(id=demo), headers=auth)
+        self.assertEqual((self.launcher.planned, self.launcher.multitap), (False, False), 'the choice is kept')
+        await client.post('/api/game', json=dict(id=demo, multitap=True), headers=auth)
+        self.assertEqual((self.launcher.planned, self.launcher.multitap), (True, True), 'a pick may still say')
+        for bad in (dict(id=self.ids['Canyon Racer'], on=True), dict(id=demo, on='no')):
+            self.assertEqual((await client.post('/api/game/multitap', json=bad, headers=auth)).status, 400)
+        await client.post('/api/game', json=dict(id=self.ids['Canyon Racer']), headers=auth)
+        self.assertIsNone(self.launcher.multitap, 'PS1 keeps its own')
+
+    async def test_the_fallback_stream_announces_the_rate_it_sends(self):
+        room, client = await self.room()
+        token, auth = await self.join(client)
+        await client.post('/api/game', json=dict(id=self.ids['Canyon Racer']), headers=auth)  # a 44.1 kHz game
+        async with client.ws_connect('/api/socket') as ws:
+            await ws.send_json(dict(token=token))
+            ready = await ws.receive_json()
+            self.assertEqual(ready['sampleRate'], room.audio.rate)
+            self.assertNotEqual(ready['sampleRate'], room.session.sample_rate, 'the room started idle')
+
+    async def test_unknown_game_and_no_library(self):
+        room, client = await self.room()
+        _, auth = await self.join(client)
+        self.assertEqual((await client.post('/api/game', json=dict(id='nope'), headers=auth)).status, 404)
+        self.assertEqual((await client.post('/api/game', json=dict(id=self.ids['Demo']))).status, 401)
+        room.library = None
+        self.assertEqual((await client.post('/api/game', json=dict(id=self.ids['Demo']), headers=auth)).status, 404)
+        state = await (await client.get('/api/state', headers=auth)).json()
+        self.assertFalse(state['canPick'])
+
+    async def test_admin_pin_gates_picking(self):
+        room, client = await self.room(admin_pin='4321')
+        _, auth = await self.join(client)
+        _, other = await self.join(client, 'Bob')
+        state = await (await client.get('/api/state', headers=auth)).json()
+        self.assertEqual((state['canPick'], state['adminPin']), (False, True))
+        self.assertEqual((await client.post('/api/game', json=dict(id=self.ids['Demo']), headers=auth)).status, 403)
+        self.assertEqual((await client.post('/api/admin', json=dict(pin='0000'), headers=auth)).status, 403)
+        self.assertEqual((await client.post('/api/admin', json=dict(pin='4321'), headers=auth)).status, 200)
+        self.assertTrue((await (await client.get('/api/state', headers=auth)).json())['canPick'])
+        self.assertEqual((await client.post('/api/game', json=dict(id=self.ids['Demo']), headers=auth)).status, 200)
+        self.assertEqual((await client.post('/api/game/stop', headers=other)).status, 403, 'unlocks one player only')
+
+    async def test_admin_pin_guesses_are_rate_limited(self):
+        room, client = await self.room(admin_pin='4321')
+        _, auth = await self.join(client)
+        for _ in range(12):
+            await client.post('/api/admin', json=dict(pin='0000'), headers=auth)
+        self.assertEqual((await client.post('/api/admin', json=dict(pin='4321'), headers=auth)).status, 429)
+
+
+class ActivityTests(IsolatedAsyncioTestCase):
+    """Who is choosing, and the game starting or just stopped, as every player in the room sees it."""
+    asyncSetUp, room, join = SwitchTests.asyncSetUp, SwitchTests.room, SwitchTests.join
+
+    async def state(self, client, auth):
+        return await (await client.get('/api/state', headers=auth)).json()
+
+    async def test_only_a_player_who_may_choose_shows_as_choosing(self):
+        room, client = await self.room(admin_pin='4321')
+        _, ann = await self.join(client)
+        _, bob = await self.join(client, 'Bob')
+        self.assertEqual((await client.post('/api/picker', json=dict(open=True), headers=bob)).status, 403)
+        self.assertEqual((await client.post('/api/picker', json=dict(open=True))).status, 401)
+        self.assertEqual((await client.post('/api/picker', json=dict(open='yes'), headers=ann)).status, 400)
+        await client.post('/api/admin', json=dict(pin='4321'), headers=ann)
+        response = await client.post('/api/picker', json=dict(open=True), headers=ann)
+        self.assertEqual(response.status, 200)
+        self.assertEqual((await self.state(client, bob))['choosing'], [dict(name='Ann', yours=False)])
+        self.assertTrue((await self.state(client, ann))['choosing'][0]['yours'])
+        # No path or file name is ever sent.
+        state = await self.state(client, bob)
+        self.assertNotIn('.elf', str(state))
+        self.assertNotIn('.cue', str(state))
+
+    async def test_choosing_clears_on_close_leave_timeout_and_lost_right(self):
+        room, client = await self.room()
+        ann_token, ann = await self.join(client)
+        _, bob = await self.join(client, 'Bob')
+        await client.post('/api/picker', json=dict(open=True), headers=ann)
+        await client.post('/api/picker', json=dict(open=False), headers=ann)
+        self.assertEqual((await self.state(client, bob))['choosing'], [])
+
+        await client.post('/api/picker', json=dict(open=True), headers=ann)
+        room.choosers[ann_token]['until'] = 0  # its page stopped reporting
+        self.assertEqual((await self.state(client, bob))['choosing'], [])
+
+        await client.post('/api/picker', json=dict(open=True), headers=ann)
+        room.library = None  # nobody may choose any more
+        self.assertEqual((await self.state(client, bob))['choosing'], [])
+        room.library = self.library
+
+        await client.post('/api/picker', json=dict(open=True), headers=ann)
+        await client.post('/api/leave', json={}, headers=ann)
+        self.assertEqual((await self.state(client, bob))['choosing'], [])
+        self.assertEqual(room.choosers, {})
+
+    async def test_picker_updates_are_rate_limited(self):
+        room, client = await self.room()
+        _, ann = await self.join(client)
+        for _ in range(30):
+            await client.post('/api/picker', json=dict(open=True), headers=ann)
+        self.assertEqual((await client.post('/api/picker', json=dict(open=False), headers=ann)).status, 429)
+
+    async def test_everyone_sees_the_game_starting_with_its_chooser_then_it_clears(self):
+        gate = threading.Event()
+        room, client = await self.room(**{'Canyon Racer': dict(gate=gate)})
+        _, ann = await self.join(client)
+        _, bob = await self.join(client, 'Bob')
+        await client.post('/api/picker', json=dict(open=True), headers=ann)
+        first = asyncio.create_task(client.post('/api/game', json=dict(id=self.ids['Canyon Racer']), headers=ann))
+        while not self.log:
+            await asyncio.sleep(.01)
+        state = await self.state(client, bob)
+        starting = dict(kind='starting', by='Ann',
+                        game=dict(id=self.ids['Canyon Racer'], title='Canyon Racer', console='ps1', cover=None))
+        self.assertEqual(state['change'], starting)
+        self.assertEqual(state['choosing'], [], 'picking ends the choosing')
+        gate.set()
+        self.assertEqual((await first).status, 200)
+        self.assertEqual((await self.state(client, bob))['change'], starting, 'it stays while the console boots')
+        room.change['until'] = 0
+        self.assertIsNone((await self.state(client, bob))['change'])
+
+    async def test_a_stop_says_who_stopped_and_a_failed_start_shows_nothing(self):
+        room, client = await self.room(**{'Demo': dict(fail=True)})
+        _, ann = await self.join(client)
+        _, bob = await self.join(client, 'Bob')
+        await client.post('/api/game', json=dict(id=self.ids['Canyon Racer']), headers=ann)
+        await client.post('/api/game/stop', headers=bob)
+        self.assertEqual((await self.state(client, ann))['change'], dict(
+            kind='stopped', by='Bob', game=dict(id=self.ids['Canyon Racer'], title='Canyon Racer', console='ps1', cover=None)))
+        self.assertEqual((await client.post('/api/game', json=dict(id=self.ids['Demo']), headers=ann)).status, 500)
+        self.assertIsNone((await self.state(client, ann))['change'])
+
+    async def test_a_game_without_a_boot_screen_clears_soon_after_it_starts(self):
+        room, client = await self.room()
+        _, ann = await self.join(client)
+        await client.post('/api/game', json=dict(id=self.ids['Demo'], bootScreen=False), headers=ann)
+        self.assertLessEqual(room.change['until']-time.monotonic(), STARTED_FOR)
+
+
+class FakeChannel:
+    readyState = 'open'
+
+    def __init__(self):
+        self.sent = []
+
+    def send(self, text):
+        self.sent.append(json.loads(text))
+
+
+class MirrorTests(IsolatedAsyncioTestCase):
+    """The chooser's picker, read-only, for everyone else in the room."""
+    asyncSetUp, room, join = SwitchTests.asyncSetUp, SwitchTests.room, SwitchTests.join
+
+    async def players(self, admin_pin=None, names=('Ann', 'Bob')):
+        room, client = await self.room(admin_pin=admin_pin)
+        tokens = []
+        for name in names:
+            token, _ = await self.join(client, name)
+            room.clients[token]['channel'] = FakeChannel()
+            tokens.append(token)
+        return room, client, tokens
+
+    def push(self, room, token, s):
+        room.mirror_update(token, room.clients[token], dict(t='mirror', s=s))
+
+    def seen(self, room, token):
+        return [m for m in room.clients[token]['channel'].sent if m['t'] == 'mirror']
+
+    @staticmethod
+    async def text(ws):
+        """The next JSON message, past the video and sound the socket also carries."""
+        while True:
+            message = await asyncio.wait_for(ws.receive(), 2)
+            if message.type == aiohttp.WSMsgType.TEXT:
+                return json.loads(message.data)
+
+    def view(self, **changes):
+        return dict(dict(q='', c='all', y=0, h=None, p=None, o=None, l='d6'), **changes)
+
+    async def test_viewers_get_the_chooser_picker_and_the_chooser_gets_nothing_back(self):
+        room, client, (ann, bob) = await self.players()
+        self.push(room, ann, self.view(q='canyon', c='ps1', y=0.25, h=self.ids['Canyon Racer'], p=[0.5, 0.4], o=[0.2, 0.9]))
+        message = self.seen(room, bob)[-1]
+        self.assertEqual((message['t'], message['name']), ('mirror', 'Ann'))
+        self.assertEqual(message['s'], dict(q='canyon', c='ps1', y=0.25, h=self.ids['Canyon Racer'],
+                                            p=[0.5, 0.4], o=[0.2, 0.9], l='d6', sel=None))
+        self.assertEqual(self.seen(room, ann), [])
+        state = await (await client.get('/api/state', headers=dict(Authorization='Bearer '+ann))).json()
+        self.assertEqual((state['mirror']['yours'], state['mirror']['s']), (True, None))
+        state = await (await client.get('/api/state', headers=dict(Authorization='Bearer '+bob))).json()
+        self.assertEqual((state['mirror']['name'], state['mirror']['s']['q']), ('Ann', 'canyon'))
+
+    async def test_only_the_whitelisted_fields_are_passed_on_and_never_a_pin(self):
+        room, _, (ann, bob) = await self.players(admin_pin='4321')
+        room.clients[ann]['admin'] = True
+        self.push(room, ann, dict(self.view(q='demo'), pin='4321', adminPin='4321', password='4321',
+                                  keys=['4', '3', '2', '1'], value='4321', sel=self.ids['Demo']))
+        message = self.seen(room, bob)[-1]
+        self.assertEqual(set(message['s']), {'q', 'c', 'y', 'h', 'p', 'o', 'l', 'sel'})
+        self.assertIsNone(message['s']['sel'], 'only the host marks a choice')
+        self.assertNotIn('4321', json.dumps(message))
+        self.assertNotIn('4321', json.dumps(room.mirror_view(bob)))
+
+    async def test_a_player_who_may_not_choose_cannot_push_a_picker(self):
+        room, _, (ann, bob) = await self.players(admin_pin='4321')
+        self.push(room, ann, self.view(q='demo'))
+        self.assertIsNone(room.mirror)
+        self.assertEqual(self.seen(room, bob), [])
+        room.clients[ann]['admin'] = True
+        self.push(room, ann, self.view(q='demo'))
+        self.assertEqual(self.seen(room, bob)[-1]['s']['q'], 'demo')
+        # A player who may not choose cannot end someone else's mirror either.
+        self.push(room, bob, None)
+        self.assertEqual(room.mirror['name'], 'Ann')
+
+    async def test_one_chooser_at_a_time(self):
+        room, _, (ann, bob, cy) = await self.players(names=('Ann', 'Bob', 'Cy'))
+        self.push(room, ann, self.view(q='first'))
+        self.push(room, bob, self.view(q='second'))
+        self.assertEqual([m['s']['q'] for m in self.seen(room, cy)], ['first'])
+        self.assertEqual(room.mirror['name'], 'Ann')
+        self.push(room, ann, None)
+        self.push(room, bob, self.view(q='second'))
+        self.assertEqual(self.seen(room, cy)[-1]['name'], 'Bob', 'free once the first one closes')
+
+    async def test_values_are_cleaned_and_bad_ones_dropped(self):
+        room, _, (ann, bob) = await self.players()
+        self.push(room, ann, dict(q='x'*500 + '\u202e', c='../ps2', y=float('nan'), h='../ps1/Demo.cue',
+                                  p=[2, -1], o=['a', 1], l='desktop'))
+        s = self.seen(room, bob)[-1]['s']
+        self.assertEqual(s, dict(q='x'*40, c='all', y=0, h=None, p=[1.0, 0.0], o=None, l=None, sel=None))
+        self.push(room, ann, dict(q='a\x00b\u200bc', y=0.12345, p=[0.5]))
+        s = self.seen(room, bob)[-1]['s']
+        self.assertEqual((s['q'], s['y'], s['p']), ('a b c', 0.123, None))
+        self.push(room, ann, 'not a state')
+        self.assertEqual(len(self.seen(room, bob)), 2)
+
+    async def test_updates_are_rate_limited(self):
+        room, _, (ann, bob) = await self.players()
+        for n in range(100):
+            self.push(room, ann, self.view(q=str(n)))
+        self.assertLessEqual(len(self.seen(room, bob)), 25)
+
+    async def test_numbers_only_grow_so_a_late_update_is_dropped(self):
+        room, _, (ann, bob) = await self.players()
+        for q in ('a', 'b'):
+            self.push(room, ann, self.view(q=q))
+        self.push(room, ann, None)
+        numbers = [m['n'] for m in self.seen(room, bob)]
+        self.assertEqual(numbers, sorted(set(numbers)))
+
+    async def test_a_choosing_session_keeps_its_id_until_it_ends(self):
+        room, client, (ann, bob) = await self.players()
+        self.push(room, ann, self.view(q='a'))
+        self.push(room, ann, self.view(q='ab'))
+        first = [m['id'] for m in self.seen(room, bob)]
+        self.assertEqual(len(set(first)), 1, 'one id for the whole session, so a page can keep it hidden')
+        self.push(room, ann, None)
+        self.assertIsNone(self.seen(room, bob)[-1]['id'])
+        self.push(room, ann, self.view(q='b'))
+        self.assertNotEqual(self.seen(room, bob)[-1]['id'], first[0], 'the next session opens again')
+        state = await (await client.get('/api/state', headers=dict(Authorization='Bearer '+bob))).json()
+        self.assertEqual(state['mirror']['id'], self.seen(room, bob)[-1]['id'], 'a player joining now sees it')
+
+    async def test_it_ends_at_once_when_the_chooser_connection_drops(self):
+        room, client = await self.room()
+        ann, _ = await self.join(client)
+        bob, _ = await self.join(client, 'Bob')
+        room.clients[bob]['channel'] = FakeChannel()
+        await client.post('/api/picker', json=dict(open=True), headers=dict(Authorization='Bearer '+ann))
+        self.assertEqual([c['name'] for c in room.choosing(bob)], ['Ann'])
+        async with client.ws_connect('/api/socket') as chooser:
+            await chooser.send_json(dict(token=ann))
+            self.assertEqual((await self.text(chooser))['t'], 'ready')
+            await chooser.send_json(dict(t='mirror', s=self.view(q='ruins')))
+            for _ in range(50):
+                if room.mirror:
+                    break
+                await asyncio.sleep(0.01)
+            self.assertEqual(room.mirror['name'], 'Ann')
+        started = time.monotonic()
+        while room.mirror and time.monotonic()-started < 3:
+            await asyncio.sleep(0.01)
+        self.assertLess(time.monotonic()-started, 3, 'well before the 5 seconds of quiet')
+        self.assertIsNone(room.mirror)
+        self.assertIsNone(room.clients[bob]['channel'].sent[-1]['s'])
+        self.assertEqual(room.choosing(bob), [], 'nor is Ann still shown choosing')
+
+    async def test_it_clears_on_close_leave_timeout_and_lost_right(self):
+        room, client, (ann, bob) = await self.players(admin_pin='4321')
+        room.clients[ann]['admin'] = True
+        self.push(room, ann, self.view())
+        self.push(room, ann, None)
+        self.assertIsNone(self.seen(room, bob)[-1]['s'])
+
+        room.choosers[ann] = dict(until=time.monotonic()+60)
+        self.push(room, ann, self.view())
+        room.mirror['until'] = 0  # its page went quiet
+        self.assertIsNone(room.mirror_view(bob)['s'])
+        self.assertIsNone(self.seen(room, bob)[-1]['s'])
+        self.assertEqual(room.choosing(bob), [], 'a page that went quiet is not shown choosing either')
+
+        self.push(room, ann, self.view())
+        room.clients[ann]['admin'] = False
+        self.assertIsNone(room.mirror_view(bob)['s'])
+
+        room.clients[ann]['admin'] = True
+        self.push(room, ann, self.view())
+        await client.post('/api/leave', json={}, headers=dict(Authorization='Bearer '+ann))
+        self.assertIsNone(room.mirror)
+        self.assertIsNone(self.seen(room, bob)[-1]['s'])
+
+    async def test_a_pick_marks_the_choice_for_viewers(self):
+        room, client, (ann, bob) = await self.players()
+        self.push(room, ann, self.view(h=self.ids['Canyon Racer']))
+        response = await client.post('/api/game', json=dict(id=self.ids['Demo']),
+                                     headers=dict(Authorization='Bearer '+ann))
+        self.assertEqual(response.status, 200)
+        sent = [m['s'] for m in self.seen(room, bob) if m['s']]
+        self.assertEqual((sent[-1]['sel'], sent[-1]['h']), (self.ids['Demo'], self.ids['Demo']))
+
+    async def test_over_a_running_game_viewers_get_the_whole_list_pointer_included(self):
+        room, client, (ann, bob) = await self.players()
+        auth = dict(Authorization='Bearer '+ann)
+        self.assertEqual((await client.post('/api/game', json=dict(id=self.ids['Demo']), headers=auth)).status, 200)
+        await asyncio.sleep(0.05)
+        self.assertTrue((await (await client.get('/api/state', headers=auth)).json())['host']['game'])
+        view = self.view(q='can', c='ps1', y=0.4, h=self.ids['Canyon Racer'], p=[0.25, 0.5], o=[0.1, 0.9], l='d6')
+        self.push(room, ann, view)
+        self.assertEqual(self.seen(room, bob)[-1]['s'], dict(view, sel=None), 'nothing is held back while a game runs')
+        state = await (await client.get('/api/state', headers=dict(Authorization='Bearer '+bob))).json()
+        self.assertEqual(state['mirror']['s'], dict(view, sel=None), 'nor from a player who joins now')
+        await client.post('/api/game', json=dict(id=self.ids['Canyon Racer']), headers=auth)
+        picked = [m['s'] for m in self.seen(room, bob) if m['s'] and m['s']['sel']]
+        self.assertEqual(picked[-1]['sel'], self.ids['Canyon Racer'], 'a switch is picked out too')
+
+    async def test_after_a_pick_it_ends_by_itself_and_the_next_look_is_a_new_session(self):
+        room, client, (ann, bob) = await self.players()
+        with mock.patch.object(server, 'MIRROR_PICKED', 0.3):
+            self.push(room, ann, self.view())
+            picked = self.seen(room, bob)[-1]['id']
+            await client.post('/api/game', json=dict(id=self.ids['Demo']), headers=dict(Authorization='Bearer '+ann))
+            self.push(room, ann, self.view(h=self.ids['Canyon Racer']))  # sent just before the pick, arriving after it
+            self.assertEqual(self.seen(room, bob)[-1]['s']['sel'], self.ids['Demo'], 'a late update does not undo the pick')
+            await asyncio.sleep(0.5)
+        self.assertIsNone(room.mirror, 'nobody has to ask for the state for it to end')
+        self.assertIsNone(self.seen(room, bob)[-1]['s'])
+        self.push(room, ann, self.view())
+        self.assertNotEqual(self.seen(room, bob)[-1]['id'], picked, 'a page that hid the last one shows this one')
+
+    async def test_over_the_websocket_and_a_pin_typed_on_the_page_never_reaches_a_viewer(self):
+        room, client = await self.room(admin_pin='4321')
+        ann, auth = await self.join(client)
+        bob, _ = await self.join(client, 'Bob')
+        await client.post('/api/admin', json=dict(pin='4321'), headers=auth)
+        async with client.ws_connect('/api/socket') as chooser, client.ws_connect('/api/socket') as viewer:
+            for ws, token in ((chooser, ann), (viewer, bob)):
+                await ws.send_json(dict(token=token))
+                self.assertEqual((await self.text(ws))['t'], 'ready')
+            await chooser.send_json(dict(t='mirror', s=dict(self.view(q='ruins'), pin='4321')))
+            await chooser.send_str(json.dumps(dict(t='mirror', s=self.view(q='y'*600))))  # too big: dropped
+            message = await self.text(viewer)
+            self.assertEqual((message['name'], message['s']['q']), ('Ann', 'ruins'))
+            self.assertNotIn('4321', json.dumps(message))
+            await chooser.send_json(dict(t='mirror', s=None))
+            self.assertIsNone((await self.text(viewer))['s'])
+
+
+class HubResizeTests(TestCase):
+    def test_players_keep_slots_that_still_exist(self):
+        hub = InputHub(4)
+        hub.claim('ann', 1)
+        hub.claim('bob', 3)
+        hub.update('bob', 1, 5)
+        hub.resize(2)
+        self.assertEqual(hub.slots(), [None, 'ann'])
+        self.assertEqual(len(hub.snapshot()), 2)
+        self.assertFalse(hub.update('bob', 2, 5), 'a player without a slot sends no input')
+        hub.resize(4)
+        self.assertEqual(hub.slots(), [None, 'ann', None, None])
+        hub.claim('bob', 3)
+        hub.polled(3, 1)
+
+
+class LauncherTests(TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.cores = Path(self.temporary.name)
+
+    def game(self, console, profile, title='Demo'):
+        return Game('0123456789abcdef', title, console, profile, Path('game'))
+
+    def test_ps1_has_four_players_on_the_multitap(self):
+        core, players, multitap = Launcher('s', 'saves', self.cores).plan(self.game('ps1', 'ps1'))
+        self.assertEqual((core.name, players, multitap), (core_filename(core='pcsx_rearmed'), 4, 'port 1'))
+        self.assertEqual(Launcher('s', 'saves', self.cores, 2).plan(self.game('ps1', 'ps1'))[1:], (2, 'disabled'))
+
+    def test_ps2_has_four_players_on_the_stock_core_multitap(self):
+        core, players, multitap = Launcher('s', 'saves', self.cores).plan(self.game('ps2', 'ps2'))
+        self.assertEqual((core.name, players, multitap), (core_filename(core='pcsx2'), 4, 'port 1'))
+        self.assertEqual(Launcher('s', 'saves', self.cores, 2).plan(self.game('ps2', 'ps2'))[1:], (2, 'disabled'))
+        self.assertEqual(Launcher('s', 'saves', self.cores, 4).plan(self.game('ps2', 'ps2-play'))[1:], (2, None))
+
+    def test_the_pick_turns_the_ps2_multitap_on_or_off_and_leaves_ps1_alone(self):
+        launcher = Launcher('s', 'saves', self.cores)
+        self.assertEqual(launcher.plan(self.game('ps2', 'ps2'), True)[1:], (4, 'port 1'))
+        self.assertEqual(launcher.plan(self.game('ps2', 'ps2'), False)[1:], (2, 'disabled'))
+        self.assertEqual(launcher.plan(self.game('ps1', 'ps1'), False)[1:], (4, 'port 1'))
+        self.assertEqual(launcher.plan(self.game('ps2', 'ps2-play'), True)[1:], (2, None))
+        emulator = launcher.emulator(self.game('ps2', 'ps2'), InputHub(2), multitap=False)
+        self.assertEqual(emulator.variables['pcsx2_multitap'], b'disabled')
+        emulator = launcher.emulator(self.game('ps2', 'ps2'), InputHub(4), multitap=True)
+        self.assertEqual(emulator.variables['pcsx2_multitap'], b'port 1')
+
+    def test_the_multitap_starts_on_unless_the_game_is_for_two_players_at_most(self):
+        for players, on in [('1-4', True), ('1-3', True), ('2-8', True), ('4', True), ('1-2', False),
+                            ('2', False), ('1', False), ('', True), (None, True), ('many', True)]:
+            self.assertEqual(multitap_default(players), on, players)
+
+    def test_each_game_saves_in_its_own_folder_and_ps2_cards_follow(self):
+        launcher = Launcher('s', 'saves', self.cores)
+        self.assertEqual(launcher.save_folder(self.game('ps2', 'ps2')), Path('saves/ps2/Demo [01234567]'))
+        emulator = launcher.emulator(self.game('ps2', 'ps2'), InputHub(2))
+        self.assertEqual(emulator.variables['pcsx2_shared_memory_cards'], b'disabled')
+        self.assertEqual(emulator.saves.name, 'Demo [01234567]')
+
+
+class BootScreenTests(TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.system = Path(self.temporary.name)
+
+    def options(self, profile, console, **kwargs):
+        launcher = Launcher(self.system, self.system/'saves', self.system, **kwargs)
+        game = Game('0123456789abcdef', 'Demo', console, profile, Path('game'))
+        return launcher.emulator(game, InputHub(2)).variables
+
+    def test_ps1_shows_the_bios_licence_screen_only_with_a_real_bios(self):
+        self.assertEqual(self.options('ps1', 'ps1').get('pcsx_rearmed_show_bios_bootlogo'), None)
+        (self.system/'scph1001.bin').write_bytes(b'')
+        self.assertEqual(self.options('ps1', 'ps1')['pcsx_rearmed_show_bios_bootlogo'], b'enabled_no_pcsx')
+
+    def test_ps2_turns_fast_boot_off_unless_unticked(self):
+        self.assertEqual(self.options('ps2', 'ps2')['pcsx2_fastboot'], b'disabled')
+        self.assertEqual(self.options('ps2', 'ps2', boot_screen=False)['pcsx2_fastboot'], b'enabled')
+        launcher = Launcher(self.system, self.system, self.system)
+        game = Game('0123456789abcdef', 'Demo', 'ps2', 'ps2', Path('game'))
+        self.assertEqual(launcher.emulator(game, InputHub(2), False).variables['pcsx2_fastboot'], b'enabled')
+        self.assertEqual(Launcher(self.system, self.system, self.system, boot_screen=False)
+                         .emulator(game, InputHub(2), True).variables['pcsx2_fastboot'], b'disabled')
+
+    def test_host_core_options_still_win(self):
+        variables = self.options('ps2', 'ps2', options=('pcsx2_fastboot=enabled',))
+        self.assertEqual(variables['pcsx2_fastboot'], b'enabled')
+
+
+class AudioRateSwitchTests(IsolatedAsyncioTestCase):
+    async def test_the_track_keeps_its_rate_when_the_next_game_has_another(self):
+        source = FakeEmulator([], 'Demo', 44100)
+        audio, encoder = GameAudio(source, stall=.001), OpusEncoder()
+        for _ in range(3):
+            encoder.encode(await audio.recv())
+        source.sample_rate = 48000
+        for _ in range(20):
+            frame = await audio.recv()
+            self.assertEqual((frame.sample_rate, frame.samples), (44100, 882))
+            encoder.encode(frame)
+        self.assertTrue(any(bytes(frame.planes[0])))

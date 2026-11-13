@@ -59,18 +59,42 @@ class GameAudio(AudioStreamTrack):
         self.stall = stall
         self.start = None
         self.pts = None
+        # The track's rate: the game's at the start, kept when the host switches games.
+        self.rate = emulator.sample_rate
+        self.resampler = None
+        self.resampled = bytearray()
+
+    def convert(self, data, source):
+        """Resample a later game's 20 ms chunk to the track's rate; the encoder cannot change rate."""
+        if not self.resampler or self.resampler_from != source:
+            self.resampler = av.AudioResampler(format='s16', layout='stereo', rate=self.rate)
+            self.resampler_from = source
+            self.resampled.clear()
+        frame = av.AudioFrame(format='s16', layout='stereo', samples=len(data)//4)
+        frame.planes[0].update(data)
+        frame.sample_rate = source
+        for out in self.resampler.resample(frame):
+            self.resampled += bytes(out.planes[0])[:out.samples*4]
+        size = self.rate//50*4
+        if len(self.resampled) > size*5:  # never let the converted audio fall behind
+            del self.resampled[:-size]
+        result = bytes(self.resampled[:size])
+        del self.resampled[:size]
+        return result.ljust(size, b'\0')
 
     async def recv(self):
-        rate = self.emulator.sample_rate
+        source = self.emulator.sample_rate
+        rate = self.rate
         samples = rate // 50
         deadline = time.monotonic()+self.stall
-        while self.emulator.audio_queued() < samples and time.monotonic() < deadline:
+        while self.emulator.audio_queued() < source//50 and time.monotonic() < deadline:
             await asyncio.sleep(.002)
         now = time.monotonic()
         if self.start is None:
             self.start = now
+        data = self.emulator.audio_frame(source//50)
         frame = av.AudioFrame(format='s16', layout='stereo', samples=samples)
-        frame.planes[0].update(self.emulator.audio_frame(samples))
+        frame.planes[0].update(data if source == rate else self.convert(data, source))
         frame.sample_rate = rate
         if self.pts is None:
             self.pts = 0

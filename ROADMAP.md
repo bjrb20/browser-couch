@@ -25,6 +25,12 @@ The host is already a minimal libretro frontend, so other cores load the same wa
   SNES/Saturn multitaps; light guns and mice later.
 - **Library and lobby.** Scan a ROM folder grouped by system, warn when a
   required BIOS is missing, start a room per game, keep saves per game.
+  Started: `--library` lists PS1 and PS2 games, and players choose, switch and
+  stop them from the page in one room, with saves per game and the console boot
+  screen. The cores still run in the web server process: switching unloads one
+  core and loads the next in the same process, which works for PCSX ReARMed and
+  PCSX2. Still open: worker processes, so that a crashing core cannot take the
+  room down, and several rooms at once.
 
 ## 2. Split-screen zoom
 

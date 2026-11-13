@@ -14,6 +14,7 @@ from pathlib import Path
 import numpy as np
 
 import hwrender
+from library import missing_tracks
 from systems import PROFILES
 
 log = logging.getLogger(__name__)
@@ -256,6 +257,9 @@ class Emulator:
         for path in (self.core_path, self.disc):
             if not path.is_file():
                 raise RuntimeError(f'Missing file: {path}')
+        tracks = missing_tracks(self.disc)
+        if tracks:
+            raise RuntimeError(tracks)
         missing = self.profile.missing_bios(self.system)
         if missing and self.profile.bios_required:
             raise RuntimeError(missing)
@@ -278,9 +282,8 @@ class Emulator:
         if not self._signature('retro_load_game', [C.POINTER(GameInfo)], C.c_bool)(C.byref(self.game_info)):
             raise RuntimeError('The core could not load the game. Check the file, its CUE paths and the BIOS.')
         if self.hub.players > self.ports:
-            raise RuntimeError(f'This core reads {self.ports} pads, not {self.hub.players}.'
-                               + (' Build the multitap core with ./tools/build-pcsx2-multitap.sh.'
-                                  if self.profile.multitap_core else ''))
+            raise RuntimeError(f'This core reads {self.ports} pads, not {self.hub.players}. '
+                               f'Download a newer one with ./setup.sh --console {self.profile.key}.')
         for port in range(self.ports):
             self._signature('retro_set_controller_port_device', [C.c_uint, C.c_uint])(port, 1 if port < self.hub.players else 0)
         av = AVInfo()

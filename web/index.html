@@ -22,25 +22,51 @@
           <canvas id="fallback" width="640" height="480" hidden aria-label="Live game"></canvas>
           <div id="join-panel" class="join-panel">
             <div class="join-card"><span class="eyebrow pips">NO INSTALL · JUST A BROWSER</span><h2>Ready when you are.</h2><p>One game on the host. Everyone plays from their browser, with nothing to install.</p>
-              <form id="join-form"><label>Your name<input id="name" autocomplete="nickname" maxlength="24" placeholder="Player name" required></label><label>Room code<input id="pin" type="password" autocomplete="off" maxlength="128" placeholder="Ask your host" required></label><button id="join" class="primary" type="submit">Join the game <span aria-hidden="true">↗</span></button></form>
+              <div id="rejoin" class="rejoin" hidden><p>Welcome back, <b id="rejoin-name"></b>. This device is remembered.</p><button id="rejoin-button" class="primary" type="button">Rejoin <span aria-hidden="true">↗</span></button><button id="rejoin-forget" type="button">Forget this device</button></div>
+              <form id="join-form"><label>Your name<input id="name" autocomplete="nickname" maxlength="24" placeholder="Player name" required></label><label>Room code<input id="pin" type="password" autocomplete="off" maxlength="128" placeholder="Ask your host" required></label><label class="check"><input id="remember" type="checkbox" checked> Remember this device</label><button id="join" class="primary" type="submit">Join the game <span aria-hidden="true">↗</span></button></form>
               <p class="join-note" id="join-note">Your host must keep the game service running.</p>
             </div>
           </div>
-          <div id="loading" class="loading" hidden><span class="spinner"></span><span>Connecting to the host…</span></div>
+          <div id="game-picker" class="join-panel" hidden>
+            <div class="join-card picker-card"><span class="eyebrow pips" id="picker-eyebrow">NO GAME RUNNING</span><h2>Choose a console and game.</h2><p id="picker-note">The host has not started a game yet. Everyone stays in the room while one starts.</p><form id="admin" hidden><label>Host PIN<input id="admin-pin" type="password" autocomplete="off" maxlength="64"></label><button type="submit">Unlock</button></form><label id="boot-option" class="check" hidden><input id="boot-screen" type="checkbox" checked> Play the console's boot screen first</label><div class="picker-tools" id="picker-tools" hidden><label class="search"><span class="sr-only">Search games</span><input id="game-search" type="search" placeholder="Search games" autocomplete="off" spellcheck="false" enterkeyhint="search"></label><div id="console-filter" class="console-filter" role="group" aria-label="Console"></div><button id="fetch-missing" type="button" hidden>Fetch missing art and details</button></div><section id="game-about" class="game-about" aria-live="polite" hidden></section><div id="library"></div><p id="no-match" class="no-match" role="status" hidden></p><input id="cover-file" type="file" accept="image/jpeg,image/png,image/webp" hidden><div class="picker-actions"><button id="stop-game" type="button" hidden>Stop the game</button><button id="close-picker" type="button" hidden>Back to the game</button></div></div><div id="ghost" class="ghost" aria-hidden="true" hidden><svg viewBox="0 0 14 20" width="14" height="20"><path d="M1 1v16l4.2-4 2.9 6.4 2.8-1.3-2.8-6.2H14z"/></svg><span></span></div>
+          </div>
+          <div id="seat-notice" class="seat-notice" role="status" aria-live="assertive" hidden></div>
+          <div id="loading" class="loading" role="status" aria-live="polite" hidden><span class="spinner"></span><span>Connecting to the host…</span></div>
         </div>
-        <div class="screen-bar"><span class="live"><i></i><span id="stream-info">Waiting for a stream</span></span><div><button id="sound" disabled>Enable sound</button><button id="fullscreen" aria-label="Fullscreen game">Fullscreen ↗</button><button id="leave" disabled>Leave</button></div></div>
+        <div class="screen-bar"><span class="live"><i></i><span id="stream-info">Waiting for a stream</span></span><div><button id="sound" disabled>Enable sound</button><button id="fullscreen" aria-label="Fullscreen game">Fullscreen ↗</button><button id="change-game" hidden>Change game</button><button id="reconnect" disabled title="Reconnect the picture and controls">Reconnect</button><button id="leave" disabled>Leave</button></div></div>
+        <div id="activity" class="activity" role="status" aria-live="polite" hidden></div>
         <p id="message" role="status" aria-live="polite">Enter your name and the room code to connect.</p>
         <details id="connection-details"><summary>Connection details</summary><dl id="diagnostics"><div><dt>Status</dt><dd>Join a game to measure</dd></div></dl><p>RTT and receiver buffering are separate measurements; neither is total button-to-screen delay.</p></details>
     <section class="touch-pad" id="touch-pad" aria-label="Touch controller"><div class="top-row"><div class="shoulders left"><button data-button="12">L2</button><button data-button="10">L1</button></div><div class="center"><button data-button="2" class="start">SELECT</button><button data-button="3" class="start">START</button></div><div class="shoulders right"><button data-button="11">R1</button><button data-button="13">R2</button></div></div><button id="exit-fullscreen" class="exit-fullscreen" aria-label="Exit fullscreen">✕</button><div class="stick left" data-stick="0" aria-label="Left stick"><span></span></div><div class="stick right" data-stick="1" aria-label="Right stick"><span></span></div><div class="dpad"><button data-button="4" aria-label="Up">↑</button><button data-button="6" aria-label="Left">←</button><button data-button="5" aria-label="Down">↓</button><button data-button="7" aria-label="Right">→</button></div><div class="face-buttons"><button data-button="1" aria-label="Square">□</button><button data-button="0" aria-label="Cross">✕</button><button data-button="8" aria-label="Circle">○</button><button data-button="9" aria-label="Triangle">△</button></div></section>
       </section>
       <aside>
+        <details id="now-playing" class="now-playing" open hidden>
+          <summary><span class="eyebrow">NOW PLAYING</span><span id="np-short" class="np-short"></span></summary>
+          <div id="np-art" class="np-art" aria-hidden="true"></div>
+          <div class="np-body">
+            <h2 id="np-title"></h2>
+            <p class="np-line"><span id="np-console"></span> · <span id="np-running"></span></p>
+            <dl id="np-facts" class="np-facts"></dl>
+            <p id="np-description" class="np-description"></p>
+            <ul id="np-players" class="np-players" aria-label="Players"></ul>
+            <button id="np-edit" type="button" hidden>Edit details</button>
+            <form id="np-form" class="np-form" hidden>
+              <label>Description<textarea id="np-edit-description" rows="5" maxlength="2000"></textarea></label>
+              <div class="np-pair"><label>Year<input id="np-edit-year" inputmode="numeric" maxlength="4" pattern="(19[4-9][0-9]|20[0-9][0-9])" placeholder="1998" autocomplete="off"></label><label>Genre<input id="np-edit-genre" maxlength="60" autocomplete="off"></label></div>
+              <p class="np-hint">Leave a field empty to show the fetched one, if any.</p>
+              <div class="np-actions"><button type="submit" class="np-save">Save</button><button id="np-cancel" type="button">Cancel</button></div>
+            </form>
+          </div>
+        </details>
         <div class="roster-heading"><h2>The starting grid</h2><span id="viewer-count">0 in room</span></div>
         <p class="muted">Choose one player slot. Everyone sees the same live game.</p>
         <div id="slots" class="slots"></div>
         <button id="spectate" class="spectate" disabled>Just watching</button>
+        <section id="manage" class="manage" aria-label="Manage players" hidden><div class="manage-heading"><span class="eyebrow">MANAGE PLAYERS</span><button id="admin-lock" type="button">Lock host controls</button></div><p class="muted">Move anyone to another slot, swap two players, free a slot or remove someone. It works mid-game.</p><ul id="roster" class="roster"></ul></section>
         <div class="controller"><span class="eyebrow">YOUR CONTROLLER</span><label class="sr-only" for="gamepad">Gamepad</label><select id="gamepad"><option value="auto">Keyboard / first gamepad</option></select><p id="pad-note">Keyboard and touch controls are ready.</p></div>
         <div class="keys"><span class="eyebrow" id="pad-label">KEYBOARD → PS1 PAD</span><dl><div><dt id="dpad-keys">WASD / Arrows</dt><dd>D-pad</dd></div><div class="analog-only" hidden><dt>WASD · Arrows</dt><dd>Left · right stick</dd></div><div><dt>K / Space</dt><dd>Cross ✕</dd></div><div><dt>J · L · I</dt><dd>Square · Circle · Triangle</dd></div><div><dt>U / O · Y / P</dt><dd>L1 / R1 · L2 / R2</dd></div><div><dt>Enter · Shift</dt><dd>Start · Select</dd></div><div class="analog-only" hidden><dt>C · M</dt><dd>L3 · R3</dd></div></dl></div>
         <p class="footnote">Player 1 navigates the game menus. Choose multiplayer in the original game. Leaving the room releases your controller; the shared game keeps running.</p>
+        <p class="device-note"><span id="device-note">This device is not remembered.</span> <button id="forget" type="button" hidden>Log out and forget this device</button></p>
       </aside>
     </div>
 

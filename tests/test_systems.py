@@ -21,9 +21,9 @@ class ProfileTests(unittest.TestCase):
         self.assertEqual(options['pcsx2_renderer'], b'OpenGL')
         self.assertEqual(options['pcsx2_fastboot'], b'disabled')
         self.assertNotIn('pcsx_rearmed_multitap', options)
-        self.assertEqual(options['pcsx2_multitap'], b'disabled', 'the multitap is off for two players')
-        self.assertEqual(profile.options('port 1')['pcsx2_multitap'], b'port 1')
-        self.assertEqual((profile.default_players, profile.max_players), (2, 4))
+        self.assertEqual(options['pcsx2_multitap'], b'port 1', 'four players on a multitap in port 1')
+        self.assertEqual(profile.options('disabled')['pcsx2_multitap'], b'disabled')
+        self.assertEqual((profile.default_players, profile.max_players), (4, 4))
 
     def test_missing_bios_is_reported_until_a_dump_is_present(self):
         with tempfile.TemporaryDirectory() as system:
@@ -47,6 +47,16 @@ class ProfileTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, 'No PS2 BIOS'):
                 emulator._load()
 
+    def test_emulator_names_missing_cue_tracks_before_loading_the_core(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root/'core.so').write_bytes(b'')
+            (root/'game.cue').write_text('FILE "game.bin" BINARY\n  TRACK 01 MODE2/2352\n')
+            (root/'game.ape').write_bytes(b'')
+            emulator = Emulator(root/'core.so', root/'game.cue', root/'system', root/'saves', InputHub(2))
+            with self.assertRaisesRegex(RuntimeError, 'names 1 track file that is not there. Its folder has .ape'):
+                emulator._load()
+
     def test_controller_info_limits_the_ports_and_the_players(self):
         import ctypes as C
         from emulator import ControllerInfo
@@ -59,7 +69,7 @@ class ProfileTests(unittest.TestCase):
     def test_status_names_the_console(self):
         emulator = Emulator('core.so', 'game.elf', 'system', 'saves', InputHub(2), profile=PROFILES['ps2'])
         status = emulator.status()
-        self.assertEqual((status['system'], status['console'], status['multitap']), ('ps2', 'PS2', 'none'))
+        self.assertEqual((status['system'], status['console'], status['multitap']), ('ps2', 'PS2', 'port 1'))
         self.assertEqual(status['renderer'], 'software')
 
 
