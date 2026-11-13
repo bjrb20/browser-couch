@@ -113,14 +113,12 @@ function folded(text){return text.normalize('NFD').replace(/\p{M}/gu,'').toLocal
 // Search and the console filter only hide cards, so typing never redraws the list or moves the focus.
 function filterLibrary(){
   const query=folded($('game-search').value.trim());let shown=0;
-  for(const box of $('library').children){
-    const match=consoleFilter==='all'||box.dataset.console===consoleFilter;let inBox=0;
-    for(const card of box.querySelectorAll('.game')){const on=match&&(!query||folded(card.dataset.title).includes(query));card.hidden=!on;if(on)inBox++;}
-    box.hidden=!match||(Boolean(query)&&!inBox);shown+=inBox;
-  }
+  const match=el=>consoleFilter==='all'||el.dataset.console===consoleFilter;
+  for(const card of shelfList.children){const on=match(card)&&(!query||folded(card.dataset.title).includes(query));card.hidden=!on;if(on)shown++;}
+  for(const note of $('library').querySelectorAll('.library-notes p'))note.hidden=!match(note);
   for(const chip of $('console-filter').children)chip.setAttribute('aria-pressed',String(chip.dataset.console===consoleFilter));
   const total=(library?.consoles||[]).reduce((n,c)=>n+c.games.length,0);
-  mirrorSoon();
+  shelf.hidden=!shown;shelfEnds();mirrorSoon();
   $('no-match').hidden=!total||shown>0;$('no-match').textContent=query?'No games match “'+$('game-search').value.trim()+'”.':'No games for this console.';
 }
 function placeholder(art,game,item){art.classList.add('placeholder');const c=document.createElement('b'),t=document.createElement('span');c.textContent=item.id.toUpperCase();t.textContent=game.title;art.replaceChildren(c,t);}
@@ -162,6 +160,47 @@ async function fetchArt(body,what){
   try{const r=await api('cover/fetch',body);message(r.queued?'Fetching art for '+what+' in the background.':'Nothing to fetch: every game has a cover or was looked up already.');}catch(e){message(e.message);}
   await loadLibrary(true);
 }
+// The games shelf: one row of every game, A to Z, that scrolls sideways. It is built once and keeps its scroll
+// when the list redraws (a fetch in progress redraws it every few seconds).
+const shelf=document.createElement('div'),shelfList=document.createElement('div'),shelfPrev=document.createElement('button'),shelfNext=document.createElement('button'),shelfBar=document.createElement('div'),shelfCount=document.createElement('span');
+shelf.className='shelf';shelfList.className='games';shelfList.setAttribute('aria-label','Games, A to Z');shelfList.setAttribute('role','group');
+for(const [b,text,label] of [[shelfPrev,'‹','Previous games'],[shelfNext,'›','More games']]){b.type='button';b.className='shelf-nav';b.textContent=text;b.setAttribute('aria-label',label);b.title=label;}
+shelfBar.className='shelf-bar';shelfCount.className='shelf-count';shelfBar.append(shelfCount,shelfPrev,shelfNext);shelf.append(shelfBar,shelfList);
+const gentle=matchMedia('(prefers-reduced-motion: reduce)');
+function shelfMax(){return shelfList.scrollWidth-shelfList.clientWidth;}
+function shelfEnds(){
+  const max=shelfMax(),over=max>2,had=document.activeElement;
+  shelf.classList.toggle('overflow',over);
+  // Which cards are in view: "5–8 of 23".
+  const box=shelfList.getBoundingClientRect(),shown=[...shelfList.children].filter(c=>!c.hidden);let first=0,last=0;
+  shown.forEach((c,i)=>{const r=c.getBoundingClientRect();if(r.left>=box.left-2&&r.right<=box.right+2){if(!first)first=i+1;last=i+1;}});
+  shelfCount.textContent=!shown.length?'':over&&first?first+(last>first?'–'+last:'')+' of '+shown.length:shown.length+(shown.length===1?' game':' games');
+  shelfPrev.disabled=!over||shelfList.scrollLeft<=2;shelfNext.disabled=!over||shelfList.scrollLeft>=max-2;
+  // A page button that just reached its end keeps the focus nearby, on the other one.
+  if(had===shelfPrev&&shelfPrev.disabled)(shelfNext.disabled?shelfList.querySelector('.game:not([hidden]) .pick:enabled'):shelfNext)?.focus();
+  else if(had===shelfNext&&shelfNext.disabled)(shelfPrev.disabled?shelfList.querySelector('.game:not([hidden]) .pick:enabled'):shelfPrev)?.focus();
+}
+// A page: as many whole cards as fit in the row.
+function shelfPage(dir){
+  const card=[...shelfList.children].find(c=>!c.hidden);if(!card)return;
+  const step=card.getBoundingClientRect().width+(parseFloat(getComputedStyle(shelfList).columnGap)||0);
+  const n=Math.max(1,Math.floor((shelfList.clientWidth+step*.15)/step));
+  shelfList.scrollBy({left:dir*n*step,behavior:gentle.matches?'auto':'smooth'});
+}
+shelfPrev.addEventListener('click',()=>shelfPage(-1));shelfNext.addEventListener('click',()=>shelfPage(1));
+shelfList.addEventListener('scroll',()=>{shelfEnds();mirrorSoon();},{passive:true});
+new ResizeObserver(shelfEnds).observe(shelfList);
+// A mouse wheel over the row scrolls it sideways. Elsewhere, and once the row is at its end, the page scrolls as usual.
+shelfList.addEventListener('wheel',event=>{
+  // Not for a zoom, a trackpad's own sideways swipe, or a wheel the browser already used to scroll the page past the row.
+  if(!event.cancelable||event.ctrlKey||Math.abs(event.deltaX)>=Math.abs(event.deltaY))return;
+  const max=shelfMax(),left=shelfList.scrollLeft;
+  if(max<=2||event.deltaY<0&&left<=1||event.deltaY>0&&left>=max-1)return;
+  const unit=event.deltaMode===1?40:event.deltaMode===2?shelfList.clientWidth:1;
+  event.preventDefault();shelfList.scrollBy({left:event.deltaY*unit,behavior:'instant'});
+},{passive:false});
+// A to Z by title, ignoring case, accents and a leading "The".
+function sortTitle(title){return folded(title).replace(/^the\s+/,'');}
 function renderLibrary(){
   const host=roomState?.host,list=$('library'),busy=picking||Boolean(host?.loading),can=Boolean(roomState?.canPick);
   const drawn=JSON.stringify([library,host?.game,host?.loading,host?.error,can,busy,roomState?.adminPin]);if(drawn===pickerDrawn)return;pickerDrawn=drawn;
@@ -174,16 +213,20 @@ function renderLibrary(){
   $('picker-tools').hidden=!consoles.some(c=>c.games.length);$('fetch-missing').hidden=!(can&&library?.metadata);
   $('console-filter').hidden=consoles.length<2;$('console-filter').replaceChildren(...(consoles.length<2?[]:[{id:'all',name:'All'},...consoles]).map(c=>{
     const b=document.createElement('button');b.type='button';b.dataset.console=c.id;b.textContent=c.id==='all'?'All':c.id.toUpperCase();b.title=c.name;
-    b.addEventListener('click',()=>{consoleFilter=c.id;filterLibrary();});return b;}));
-  list.replaceChildren();
+    b.addEventListener('click',()=>{consoleFilter=c.id;filterLibrary();shelfList.scrollTo({left:0,behavior:'instant'});});return b;}));
+  // Each console's notes (a missing BIOS, no boot screen, an empty folder) above the one row of games.
+  const notes=document.createElement('div');notes.className='library-notes';
   for(const item of consoles){
-    const box=document.createElement('section'),title=document.createElement('h3'),games=document.createElement('div');box.className='console';box.dataset.console=item.id;games.className='games';title.textContent=item.name;box.append(title);
-    const notes=[item.warning,item.available&&!item.bootScreen?'No boot screen for '+item.name+' on this host.':null].filter(Boolean);
-    if(notes.length){const p=document.createElement('p');p.textContent=notes.join(' ');box.append(p);}
-    if(item.available&&!item.games.length){const p=document.createElement('p');p.textContent='No games in this folder yet.';box.append(p);}
-    for(const game of item.games){
+    const lines=[item.warning,item.available&&!item.bootScreen?'No boot screen for '+item.name+' on this host.':null,item.available&&!item.games.length?'No games in this folder yet.':null].filter(Boolean);
+    if(lines.length){const p=document.createElement('p'),tag=document.createElement('b');p.dataset.console=item.id;tag.textContent=item.id.toUpperCase();p.append(tag,lines.join(' '));notes.append(p);}
+  }
+  const keep=shelfList.scrollLeft,cards=[];
+  const sorted=consoles.flatMap(item=>item.games.map(game=>({game,item,key:sortTitle(game.title)})))
+    .sort((a,b)=>a.key.localeCompare(b.key,undefined,{numeric:true})||a.item.id.localeCompare(b.item.id));
+  {
+    for(const {game,item} of sorted){
       const card=document.createElement('div'),b=document.createElement('button'),art=document.createElement('span'),name=document.createElement('span'),playing=host?.game?.id===game.id;
-      card.className='game'+(playing?' playing':'');card.dataset.id=game.id;card.dataset.title=game.title;
+      card.className='game'+(playing?' playing':'');card.dataset.id=game.id;card.dataset.title=game.title;card.dataset.console=item.id;
       b.type='button';b.className='pick';b.disabled=!can||busy;b.setAttribute('aria-label',(playing?'Playing: ':'Play ')+game.title);
       art.className='art';art.dataset.art=game.id;art.setAttribute('aria-hidden','true');name.className='name';name.textContent=game.title;
       placeholder(art,game,item);b.append(art,name);
@@ -211,11 +254,11 @@ function renderLibrary(){
         // A quiet note when a lookup found nothing or failed: the card keeps its placeholder.
         if(library.metadata&&game.fetch?.note&&!game.fetch.state){const note=document.createElement('p');note.className='fetch-note';note.textContent=game.fetch.note;card.append(note);}
       }
-      games.append(card);
+      cards.push(card);
     }
-    box.append(games);list.append(box);
   }
-  filterLibrary();
+  shelfList.replaceChildren(...cards);list.replaceChildren(...(notes.children.length?[notes]:[]),shelf);
+  filterLibrary();shelfList.scrollTo({left:keep,behavior:'instant'});shelfEnds();
   for(const item of consoles)for(const game of item.games)if(game.cover)queueCover(game);  // now the cards are in the page
   if(focusedId)list.querySelector(`.game[data-id="${focusedId}"] .pick:enabled`)?.focus();
   if(mirrorShown||mirrorIn?.s)drawMirror();
@@ -244,12 +287,12 @@ $('fetch-missing').addEventListener('click',()=>fetchArt({missing:true},'every g
 // Arrow keys and a gamepad's D-pad move between cards by position; Enter, Space or the pad's ✕ button picks.
 function pickerTargets(){return [...$('game-picker').querySelectorAll('button:enabled,input:not([type=checkbox]):not([hidden])')].filter(e=>e.offsetParent&&!e.closest('[hidden]'));}
 function moveFocus(dx,dy){
-  const items=pickerTargets(),from=document.activeElement;if(!items.length)return;
+  const items=pickerTargets().filter(e=>!e.classList.contains('shelf-nav')),from=document.activeElement;if(!items.length)return;
   if(!items.includes(from)){(items.find(e=>e.classList.contains('pick'))||items[0]).focus();return;}
   const a=from.getBoundingClientRect(),ax=a.left+a.width/2,ay=a.top+a.height/2;let best=null,score=Infinity;
   for(const e of items){if(e===from)continue;const b=e.getBoundingClientRect(),x=b.left+b.width/2-ax,y=b.top+b.height/2-ay,along=dx?x*dx:y*dy,across=dx?Math.abs(y):Math.abs(x);
     if(along<=1)continue;const s=along+across*3;if(s<score){score=s;best=e;}}
-  if(best){best.focus();best.scrollIntoView({block:'nearest'});}
+  if(best){best.focus();best.scrollIntoView({block:'nearest',inline:'nearest'});}
 }
 const arrows={ArrowLeft:[-1,0],ArrowRight:[1,0],ArrowUp:[0,-1],ArrowDown:[0,1]};
 $('game-picker').addEventListener('keydown',event=>{
@@ -302,11 +345,14 @@ document.addEventListener('visibilitychange',reportPicker);
 // focus, and the pointer. Nothing else is read, so the PIN and every other field never leave the page.
 const pickerCard=document.querySelector('.picker-card'),round3=v=>Math.round(Math.min(Math.max(v,0),1)*1000)/1000;
 const mirrorOut={on:false,last:'',at:0,timer:null,p:null,o:null,over:null,pointerAt:0};
-function layoutKey(){const grid=[...$('library').querySelectorAll('.games')].find(g=>g.offsetParent);return (phone.matches?'p':'d')+(grid?Math.min(getComputedStyle(grid).gridTemplateColumns.split(' ').length,99):0);}
+// Two pages lay the row out alike when their cards are the same width and as many fit in it.
+function layoutKey(){const card=[...shelfList.children].find(c=>!c.hidden),w=card?Math.round(card.getBoundingClientRect().width):0;
+  return (phone.matches?'p':'d')+w+'x'+(w?Math.min(Math.floor(shelfList.clientWidth/w),99):0);}
 function mirrorSnapshot(){
   const room=pickerCard.scrollHeight-pickerCard.clientHeight,live=performance.now()-mirrorOut.pointerAt<3000;  // a still pointer goes after 3 s
   const focusedCard=$('library').contains(document.activeElement)?document.activeElement.closest('.game')?.dataset.id:null;
-  return {q:$('game-search').value.slice(0,40),c:consoleFilter,y:room>0?round3(pickerCard.scrollTop/room):0,
+  const wide=shelfMax();
+  return {q:$('game-search').value.slice(0,40),c:consoleFilter,y:room>0?round3(pickerCard.scrollTop/room):0,x:wide>0?round3(shelfList.scrollLeft/wide):0,
     h:(live&&mirrorOut.over)||focusedCard||null,p:live?mirrorOut.p:null,o:live&&mirrorOut.over?mirrorOut.o:null,l:layoutKey()};
 }
 function mirrorFlush(force=false){
@@ -334,6 +380,7 @@ pickerCard.addEventListener('pointerleave',()=>{mirrorOut.p=mirrorOut.o=mirrorOu
 pickerCard.addEventListener('scroll',mirrorSoon,{passive:true});
 $('library').addEventListener('focusin',mirrorSoon);$('library').addEventListener('focusout',mirrorSoon);
 $('game-search').addEventListener('input',mirrorSoon);
+$('game-search').addEventListener('input',()=>shelfList.scrollTo({left:0,behavior:'instant'}));
 // Watching: the chooser's list opens by itself for everyone else, and closes when they close it, pick or drop.
 // - full: read-only in this page's own games list, with their pointer. Only while no game runs, and not
 //   while this player is typing or using their own list: that is never taken from them.
@@ -375,7 +422,10 @@ function mirrorTitle(id){
   return mirrorTitles.games[id]||null;
 }
 function revealInPicker(el){const c=pickerCard.getBoundingClientRect(),r=el.getBoundingClientRect();
-  if(r.top<c.top+8)pickerCard.scrollTop-=c.top+8-r.top;else if(r.bottom>c.bottom-8)pickerCard.scrollTop+=r.bottom-c.bottom+8;}
+  if(r.top<c.top+8)pickerCard.scrollTop-=c.top+8-r.top;else if(r.bottom>c.bottom-8)pickerCard.scrollTop+=r.bottom-c.bottom+8;
+  const l=shelfList.getBoundingClientRect();
+  if(r.left<l.left)shelfList.scrollTo({left:shelfList.scrollLeft-(l.left-r.left)-4,behavior:'instant'});
+  else if(r.right>l.right)shelfList.scrollTo({left:shelfList.scrollLeft+r.right-l.right+4,behavior:'instant'});}
 function placeGhost(s,target,same){
   const ghost=$('ghost'),base=ghost.parentElement.getBoundingClientRect();let x,y;
   if(target&&(s.o||s.sel)){const r=target.getBoundingClientRect(),o=s.o||[.5,.5];x=r.left+o[0]*r.width;y=r.top+o[1]*r.height;}
@@ -387,7 +437,7 @@ function drawMirror(){
   const mode=mirrorMode();if(mirrorShown&&mirrorShown!==mode)unmirror();
   if(mode!=='full'&&mode!=='dock')return;
   const s=mirrorIn.s;
-  if(!mirrorShown){mirrorShown=mode;mirrorOwn={q:$('game-search').value,c:consoleFilter,y:pickerCard.scrollTop};pickerCard.classList.add('mirrored');
+  if(!mirrorShown){mirrorShown=mode;mirrorOwn={q:$('game-search').value,c:consoleFilter,y:pickerCard.scrollTop,x:shelfList.scrollLeft};pickerCard.classList.add('mirrored');
     if(mode==='dock')dockPicker(true);else mirrorLock(true);}
   if(mode==='dock'&&!library)void loadLibrary();  // it draws the mirror again once the list is in
   $('game-search').value=s.q;consoleFilter=library?.consoles.some(c=>c.id===s.c)?s.c:'all';filterLibrary();
@@ -395,7 +445,7 @@ function drawMirror(){
   for(const card of $('library').querySelectorAll('.game')){const id=card.dataset.id;
     card.classList.toggle('watched',id===s.h&&!s.sel);card.classList.toggle('chosen',id===s.sel);if(id===(s.sel||s.h)&&!card.hidden)target=card;}
   const same=s.l===layoutKey();
-  if(same||!target){const room=pickerCard.scrollHeight-pickerCard.clientHeight;pickerCard.scrollTop=Math.round(s.y*room);}
+  if(same||!target){const room=pickerCard.scrollHeight-pickerCard.clientHeight;pickerCard.scrollTop=Math.round(s.y*room);shelfList.scrollTo({left:Math.round((s.x||0)*shelfMax()),behavior:'instant'});}
   if(target&&(!same||s.sel))revealInPicker(target);
   placeGhost(s,target,same);
 }
@@ -412,7 +462,7 @@ function unmirror(){
   if(mirrorShown==='dock')dockPicker(false);else mirrorLock(false);
   mirrorShown=false;pickerCard.classList.remove('mirrored');$('ghost').hidden=true;
   for(const card of $('library').querySelectorAll('.watched,.chosen'))card.classList.remove('watched','chosen');
-  if(mirrorOwn){$('game-search').value=mirrorOwn.q;consoleFilter=mirrorOwn.c;filterLibrary();pickerCard.scrollTop=mirrorOwn.y;mirrorOwn=null;}
+  if(mirrorOwn){$('game-search').value=mirrorOwn.q;consoleFilter=mirrorOwn.c;filterLibrary();pickerCard.scrollTop=mirrorOwn.y;shelfList.scrollTo({left:mirrorOwn.x||0,behavior:'instant'});mirrorOwn=null;}
 }
 function activityArtwork(span,game){
   const key=game.cover?game.id+':'+game.cover:'';

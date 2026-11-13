@@ -368,11 +368,21 @@ never get file paths, discs, ROMs or BIOS files.
 
 ### Games screen and cover art
 
-The list is a grid of cards, one per game, grouped by console. The search box
-filters it as you type; case and accents do not matter. With more than one
-console, the buttons beside it show one console or all. Arrow keys, or a
-gamepad's D-pad and left stick, move between cards; Enter, Space or the pad's
-✕ picks; ○ goes back to a running game.
+The list is one row of cards, every console together, in A–Z order by title:
+case and accents do not matter, a leading "The" is skipped, and numbers sort
+by value (2 before 10). The row scrolls sideways. On a phone, swipe it; it
+settles on a card's edge. With a mouse, the wheel over the row moves it
+sideways, and the page scrolls as usual once the row reaches an end or the
+pointer is elsewhere. The ‹ and › buttons above it move one screenful of
+cards, and are greyed out at the ends; the count beside them reads, for
+example, "1–5 of 23". A console's notes (a missing BIOS, an empty folder)
+show above the row.
+
+The search box filters the row as you type; case and accents do not matter.
+With more than one console, the buttons beside it show one console or all.
+Either one goes back to the start of the row. Arrow keys, or a gamepad's D-pad
+and left stick, move between cards and scroll the row to keep the card in
+view; Enter, Space or the pad's ✕ picks; ○ goes back to a running game.
 
 A game's card shows its cover, from one of these, the first that exists:
 
