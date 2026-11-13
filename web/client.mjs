@@ -283,7 +283,7 @@ async function removeCover(game){
 }
 $('cover-file').addEventListener('change',()=>{const file=$('cover-file').files[0];if(file&&coverFor)void uploadCover(coverFor,file);coverFor=null;});
 $('game-search').addEventListener('input',filterLibrary);
-$('fetch-missing').addEventListener('click',()=>fetchArt({missing:true},'every game with no cover'));
+$('fetch-missing').addEventListener('click',()=>fetchArt({missing:true},'every game missing art or details'));
 // Arrow keys and a gamepad's D-pad move between cards by position; Enter, Space or the pad's ✕ button picks.
 function pickerTargets(){return [...$('game-picker').querySelectorAll('button:enabled,input:not([type=checkbox]):not([hidden])')].filter(e=>e.offsetParent&&!e.closest('[hidden]'));}
 function moveFocus(dx,dy){

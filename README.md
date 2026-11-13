@@ -428,9 +428,11 @@ providers to try, in order:
 ```
 
 Nothing is fetched until a player who may choose games asks. They get "Fetch
-art" on each card ("Fetch again" once it was looked up) and "Fetch art for
-all missing" above the grid, which queues every game with no cover that was
-never looked up. The host checks that right, as for uploads. Requests go out
+art" on each card ("Fetch again" once it was looked up) and "Fetch missing
+art and details" above the row. That queues every game with no cover that was
+never looked up, and every game still without a description whose last fetch
+came before a provider was added to `--metadata` (for example art from
+libretro, fetched before IGDB was set up). The host checks that right, as for uploads. Requests go out
 one at a time in the background and never hold up the page or a running game;
 the page shows the results as they arrive.
 
@@ -455,7 +457,8 @@ the page shows the results as they arrive.
 - **Cache.** What a provider returns is kept in `--covers DIR/fetched/` as
   `<game id>.jpg` and `<game id>.json`, re-encoded like an upload. It is not
   fetched again unless someone asks for that game. A game that a provider did
-  not know is remembered too, so "all missing" does not ask again. A failure
+  not know is remembered too, with the providers that were asked, so "Fetch
+missing art and details" does not ask that provider again. A failure
   (no network, a quota) is not, and shows as a short note on the card.
 - **An upload always wins.** Fetched art is shown only when there is no
   upload and no library cover, and fetching never changes either.

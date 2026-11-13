@@ -463,6 +463,29 @@ class FetcherTests(IsolatedAsyncioTestCase):
         self.assertEqual(fetcher.status(self.game.id)['note'], 'Could not reach a host')
         self.assertEqual(fetcher.missing([self.game]), [self.game])
 
+    async def test_all_missing_asks_a_provider_added_since_for_the_details(self):
+        art = lambda: FakeHttp(('Named_Boxarts', 200, image(kind='PNG')))
+        await self.run_fetch(Libretro(art()))  # before IGDB was set up: art, no details
+        record = self.covers.record(self.game.id)
+        del record['tried']  # as records written before `tried` was kept
+        self.covers.store_fetched(self.game.id, None, record)
+        provider, _ = igdb(('games', 200, games(entry(11, 'Puzzle Quest'))))
+        fetcher = Fetcher(self.covers, [quick(Libretro(art())), quick(provider)], FakeHttp())
+        self.assertEqual(fetcher.missing([self.game]), [self.game])
+        fetcher.request(fetcher.missing([self.game]))
+        await fetcher.task
+        record = self.covers.record(self.game.id)
+        self.assertEqual(record['match']['id'], 11)
+        self.assertEqual(record['tried'], ['libretro', 'igdb'])
+        self.assertEqual(fetcher.missing([self.game]), [])
+
+    async def test_all_missing_does_not_ask_again_a_provider_that_had_nothing(self):
+        provider, _ = igdb(('games', 200, b'[]'))
+        fetcher = await self.run_fetch(Libretro(FakeHttp(('Named_Boxarts', 200, image(kind='PNG')))), provider)
+        record = self.covers.record(self.game.id)
+        self.assertEqual((record['sources'], record['tried']), (['libretro'], ['libretro', 'igdb']))
+        self.assertEqual(fetcher.missing([self.game]), [])
+
     async def test_unsure_matches_keep_candidates_and_show_nothing(self):
         provider, _ = igdb(('games', 200, games(entry(41, 'Puzzle Quest 2'), entry(42, 'Puzzle Quest Deluxe'))))
         fetcher = await self.run_fetch(provider)

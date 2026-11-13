@@ -693,8 +693,25 @@ class Fetcher:
         return added
 
     def missing(self, games):
-        """Games with no cover of any kind and no earlier attempt."""
-        return [game for game in games if not self.covers.info(game) and not self.covers.record(game.id)]
+        """Games with no cover of any kind and no earlier attempt, and games still without details
+        that a provider added since their last fetch might have."""
+        names = {provider.name for provider in self.providers}
+        chosen = []
+        for game in games:
+            record = self.covers.record(game.id)
+            if not record:
+                if not self.covers.info(game):
+                    chosen.append(game)
+                continue
+            about = record.get('about') if isinstance(record.get('about'), dict) else {}
+            if about.get('description') or record.get('candidates') or record.get('match'):
+                continue
+            # Records from before `tried` was kept name only the providers that found something.
+            tried = record.get('tried', record.get('sources'))
+            tried = {name for name in tried if isinstance(name, str)} if isinstance(tried, list) else set()
+            if names-tried:
+                chosen.append(game)
+        return chosen
 
     async def work(self):
         while self.queue:
@@ -715,7 +732,7 @@ class Fetcher:
         return next((provider.name for provider in self.providers if provider.matches), None)
 
     async def fetch(self, game):
-        art, about, sources, errors, match, candidates = None, {}, [], [], None, []
+        art, about, sources, errors, match, candidates, tried = None, {}, [], [], None, [], []
         choices = await asyncio.to_thread(self.covers.matches, game.id)
         for provider in self.providers:
             if art and about.get('description'):
@@ -733,6 +750,7 @@ class Fetcher:
                 if error.stop:
                     provider.stopped = (str(error), error.until)
                 continue
+            tried.append(provider.name)
             if not found:
                 continue
             if found.match and not match:
@@ -758,7 +776,7 @@ class Fetcher:
         if candidates and not match:
             note = 'Not sure which game this is: choose the match'
         await asyncio.to_thread(self.covers.store_fetched, game.id, art,
-                                dict(sources=sources, about=about, note=note, match=match, candidates=candidates,
+                                dict(sources=sources, tried=tried, about=about, note=note, match=match, candidates=candidates,
                                      fetched=datetime.datetime.now(datetime.timezone.utc).isoformat(timespec='seconds')))
 
     async def close(self):
